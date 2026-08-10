@@ -109,3 +109,24 @@ already checked out in the workspace. `bash`, `fish`, and `powershell` work the 
 ```zsh
 mw() { cd "$(mwt path "$@")" }        # mw feat/search [repo]
 ```
+
+`mwt list --json` prints every workspace with its root, branch, and repo paths, for
+scripting against. Bound to a key with `fzf`, it becomes a jump-to-worktree shortcut:
+
+```zsh
+mwt-cd-widget() {
+  emulate -L zsh
+  (( $+commands[mwt] )) || { zle -M "mwt: not installed"; return 1 }
+  local -a lines
+  lines=(${(f)"$(mwt list --json 2>/dev/null | jq -r '.[] | [.name, .root] | @tsv')"})
+  (( $#lines )) || { zle -M "mwt: no workspaces"; return 1 }
+  local selected
+  selected=$(print -l -- $lines |
+    fzf --prompt='mwt> ' --height=40% --reverse --with-nth=1 --delimiter='\t') || return 0
+  [[ -n $selected ]] || return 0
+  BUFFER="cd -- ${(q)${selected#*$'\t'}}"
+  zle accept-line
+}
+zle -N mwt-cd-widget
+bindkey '^G' mwt-cd-widget
+```
