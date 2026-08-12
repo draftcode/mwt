@@ -86,6 +86,13 @@ type removalOpts struct {
 func removeWorkspace(ws *workspace.Workspace, opts removalOpts) error {
 	var errs []error
 	for _, r := range ws.Repos {
+		// Read the branch while the worktree still exists, and prefer it over the
+		// recorded name: the checked-out branch is the one the removal was judged
+		// against, and the recorded one may belong to work that is still live.
+		branch := ws.Branch
+		if s, err := git.Describe(r.Path); err == nil && s.OnBranch() {
+			branch = s.Branch
+		}
 		if err := git.RemoveWorktree(r.Source, r.Path, opts.force); err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", r.Name, err))
 			continue
@@ -95,7 +102,7 @@ func removeWorkspace(ws *workspace.Workspace, opts removalOpts) error {
 			if opts.force || opts.forceDeleteBranch {
 				flag = "-D"
 			}
-			if err := git.RunPassthrough(r.Source, "branch", flag, ws.Branch); err != nil {
+			if err := git.RunPassthrough(r.Source, "branch", flag, branch); err != nil {
 				errs = append(errs, fmt.Errorf("%s: delete branch: %w", r.Name, err))
 			}
 		}
