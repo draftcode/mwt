@@ -61,6 +61,63 @@ func DefaultBase(dir, want string) (string, error) {
 	return head, nil
 }
 
+// RemoteExists reports whether dir has a remote of that name.
+func RemoteExists(dir, remote string) bool {
+	out, err := Run(dir, "remote")
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if strings.TrimSpace(line) == remote {
+			return true
+		}
+	}
+	return false
+}
+
+// Fetch updates remote-tracking refs for remote, pruning deleted branches.
+func Fetch(dir, remote string) error {
+	_, err := Run(dir, "fetch", "--quiet", "--prune", remote)
+	return err
+}
+
+// DefaultBranch returns the branch remote/HEAD points at, without the remote prefix.
+func DefaultBranch(dir, remote string) (string, error) {
+	ref, err := Run(dir, "symbolic-ref", "--short", "refs/remotes/"+remote+"/HEAD")
+	if err != nil {
+		return "", fmt.Errorf("%s/HEAD is unset; run git remote set-head %s -a: %w", remote, remote, err)
+	}
+	return strings.TrimPrefix(ref, remote+"/"), nil
+}
+
+// FastForward advances the current branch to ref, refusing anything but a fast-forward.
+func FastForward(dir, ref string) error {
+	_, err := Run(dir, "merge", "--ff-only", "--quiet", ref)
+	return err
+}
+
+// ShortSHA resolves ref to its abbreviated commit hash.
+func ShortSHA(dir, ref string) string {
+	out, err := Run(dir, "rev-parse", "--short", ref)
+	if err != nil {
+		return "?"
+	}
+	return out
+}
+
+// CountCommits returns how many commits are in the range spec, e.g. "a..b".
+func CountCommits(dir, spec string) int {
+	out, err := Run(dir, "rev-list", "--count", spec)
+	if err != nil {
+		return 0
+	}
+	n, err := strconv.Atoi(out)
+	if err != nil {
+		return 0
+	}
+	return n
+}
+
 // MainWorktree returns the path of the repo a worktree belongs to.
 func MainWorktree(dir string) (string, error) {
 	common, err := Run(dir, "rev-parse", "--path-format=absolute", "--git-common-dir")

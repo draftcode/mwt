@@ -28,6 +28,6 @@ func Root() *cobra.Command {
 			return nil
 		},
 	}
-	root.AddCommand(newCmd(), addCmd(), listCmd(), overviewCmd(), statusCmd(), removeCmd(), pruneCmd(), pathCmd(), startCmd(), configCmd())
+	root.AddCommand(newCmd(), addCmd(), listCmd(), overviewCmd(), statusCmd(), syncCmd(), removeCmd(), pruneCmd(), pathCmd(), startCmd(), configCmd())
 	return root
 }

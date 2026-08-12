@@ -105,7 +105,7 @@ func pruneCmd() *cobra.Command {
 // a gh round trip, and a dozen workspaces would otherwise be a dozen serial calls.
 func judge(all []*workspace.Workspace) []wsVerdict {
 	out := make([]wsVerdict, len(all))
-	sem := make(chan struct{}, prConcurrency)
+	sem := make(chan struct{}, maxConcurrency)
 	var wg sync.WaitGroup
 	for i, ws := range all {
 		out[i] = wsVerdict{ws: ws, repos: make([]repoVerdict, len(ws.Repos))}

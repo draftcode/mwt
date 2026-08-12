@@ -29,6 +29,7 @@ mwt start feat/search                 # claude, cwd = workspace root, every repo
 mwt add worker                        # from inside the workspace
 mwt list
 mwt status                            # branch / dirty / ahead / behind per repo
+mwt sync                              # fast-forward every canonical checkout's default branch
 mwt rm feat/search --delete-branch
 mwt prune                             # drop workspaces whose PRs all merged
 ```
@@ -43,6 +44,17 @@ instead of created.
 
 `mwt rm` refuses when any repo has uncommitted files or commits that are not on a remote,
 unless `--force`.
+
+`mwt sync` fetches each canonical checkout and fast-forwards its default branch, so the
+repos that workspaces branch from do not drift behind. Pass repo names to narrow it, or
+`--no-fetch` to work from the remote-tracking refs as they are. Workspace worktrees are
+never touched, and a checkout sitting on some other branch is skipped. The fast-forward
+itself is left to git, so a diverged branch or a conflicting local edit is reported and the
+run exits non-zero instead of anything being overwritten.
+
+The repos are fetched 8 at a time, which on a few dozen of them is the difference between
+seconds and half a minute. A terminal gets a progress line while they run; redirected
+output does not, and the table is ordered by repo either way.
 
 `mwt prune` removes every workspace where each repo's branch has a MERGED pull request,
 asked in one confirmation. A repo with no PR, an open or closed-unmerged PR, uncommitted
