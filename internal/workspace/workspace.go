@@ -52,7 +52,40 @@ func Load(root string) (*Workspace, error) {
 		return nil, fmt.Errorf("parse %s: %w", filepath.Join(root, MetaFile), err)
 	}
 	ws.Root = root
+	ws.adoptUnrecorded()
 	return ws, nil
+}
+
+// adoptUnrecorded adds worktrees sitting in the workspace directory that the
+// metadata does not mention.
+//
+// An interrupted or failed hydration leaves a worktree on disk unrecorded, and an
+// unseen worktree is an unprotected one: removal skips its uncommitted work and
+// deletes the directory regardless. Adopting in memory keeps every command honest
+// without rewriting state behind the user's back. Recorded entries whose directory
+// is gone are left alone, so they are still reported rather than quietly dropped.
+func (w *Workspace) adoptUnrecorded() {
+	entries, err := os.ReadDir(w.Root)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		if _, ok := w.Repo(e.Name()); ok {
+			continue
+		}
+		path := filepath.Join(w.Root, e.Name())
+		if !git.IsRepo(path) {
+			continue
+		}
+		source, err := git.MainWorktree(path)
+		if err != nil {
+			continue
+		}
+		w.Repos = append(w.Repos, Repo{Name: e.Name(), Source: source, Path: path})
+	}
 }
 
 // Save writes the workspace metadata back to disk.

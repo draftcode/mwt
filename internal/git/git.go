@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -58,6 +59,15 @@ func DefaultBase(dir, want string) (string, error) {
 		return "", fmt.Errorf("cannot determine base ref: %w", err)
 	}
 	return head, nil
+}
+
+// MainWorktree returns the path of the repo a worktree belongs to.
+func MainWorktree(dir string) (string, error) {
+	common, err := Run(dir, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	if err != nil {
+		return "", err
+	}
+	return filepath.Dir(common), nil
 }
 
 // BranchExists reports whether a local branch of that name exists.
