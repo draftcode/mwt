@@ -31,9 +31,9 @@ type overviewRow struct {
 	URL       string `json:"url,omitempty"`
 }
 
-// prLookups run concurrently because each one is a gh round trip and a dozen
-// workspaces would otherwise take a dozen serial network calls.
-const prConcurrency = 8
+// Network work fans out because each unit is a round trip — a gh lookup or a git
+// fetch — and a few dozen of them would otherwise be a few dozen serial waits.
+const maxConcurrency = 8
 
 func overviewCmd() *cobra.Command {
 	var noPR bool
@@ -87,7 +87,7 @@ func overviewCmd() *cobra.Command {
 }
 
 func fillPRs(rows []overviewRow) {
-	sem := make(chan struct{}, prConcurrency)
+	sem := make(chan struct{}, maxConcurrency)
 	var wg sync.WaitGroup
 	for i := range rows {
 		wg.Add(1)
