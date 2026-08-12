@@ -6,6 +6,7 @@ package cmd
 import (
 	"errors"
 	"fmt"
+	"os"
 	"sync"
 	"text/tabwriter"
 
@@ -122,40 +123,78 @@ func judge(all []*workspace.Workspace) []wsVerdict {
 	return out
 }
 
-func judgeRepo(r workspace.Repo, branch string) repoVerdict {
+func judgeRepo(r workspace.Repo, recorded string) repoVerdict {
 	v := repoVerdict{repo: r}
+
+	if _, err := os.Stat(r.Path); err != nil {
+		v.detail = "worktree directory is gone"
+		return v
+	}
+	// The worktree decides which branch's PR to read, not the name recorded at
+	// creation: a branch switched or renamed inside the worktree leaves that name
+	// stale, and a merged PR found under the stale name would condemn live work.
+	s, err := git.Describe(r.Path)
+	if err != nil {
+		v.detail = fmt.Sprintf("cannot inspect (%v)", err)
+		return v
+	}
+	if !s.OnBranch() {
+		v.detail = "detached HEAD"
+		return v
+	}
+	branch := s.Branch
+	// Naming the branch keeps a surprising verdict traceable when the worktree has
+	// drifted from the workspace it lives in.
+	suffix := ""
+	if branch != recorded {
+		suffix = fmt.Sprintf(" on %s", branch)
+	}
+
 	pr, err := gh.Lookup(r.Path, branch)
 	switch {
 	case err != nil:
-		v.detail = "no pull request state (gh unavailable here)"
+		v.detail = "no pull request state (gh unavailable here)" + suffix
 		return v
 	case pr == nil:
-		v.detail = "no pull request"
+		v.detail = "no pull request" + suffix
 		return v
 	case pr.State != "MERGED":
-		v.detail = fmt.Sprintf("PR #%d %s", pr.Number, pr.State)
+		v.detail = fmt.Sprintf("PR #%d %s%s", pr.Number, pr.State, suffix)
 		return v
 	}
 
 	// The PR is merged, so commits on the branch are accounted for even when the
 	// merge was a squash. Only work that never reached the PR still matters:
-	// uncommitted files, and commits pushed nowhere. A merged branch is often
-	// deleted on the remote, which drops the upstream — comparing against the
-	// base ref there would flag every squashed commit as unpushed.
-	s, err := git.Describe(r.Path)
-	if err != nil {
-		v.detail = fmt.Sprintf("PR #%d merged, but cannot inspect (%v)", pr.Number, err)
-		return v
-	}
+	// uncommitted files, and commits pushed nowhere. Counting the PR head as
+	// reachable is what keeps a squash-merged branch prunable — its commits live
+	// on under no remote ref once the remote branch is deleted.
 	if s.Dirty > 0 {
-		v.detail = fmt.Sprintf("PR #%d merged, but %d uncommitted file(s)", pr.Number, s.Dirty)
+		v.detail = fmt.Sprintf("PR #%d merged%s, but %d uncommitted file(s)", pr.Number, suffix, s.Dirty)
 		return v
 	}
-	if s.HasUpstream && s.Ahead > 0 {
-		v.detail = fmt.Sprintf("PR #%d merged, but %d unpushed commit(s)", pr.Number, s.Ahead)
+	unpushed, err := git.UnpushedCommits(r.Path, pr.HeadOid)
+	if err != nil {
+		v.detail = fmt.Sprintf("PR #%d merged%s, but cannot inspect (%v)", pr.Number, suffix, err)
 		return v
 	}
-	v.merged, v.detail = true, fmt.Sprintf("PR #%d merged", pr.Number)
+	// A squash merge leaves the branch's commits on no remote ref, and deleting the
+	// head branch takes the PR head with it, so the count above is inflated by work
+	// that did land. refs/pull/<n>/head still holds that commit: fetch it once and
+	// ask again, rather than keeping a merged workspace forever.
+	if unpushed > 0 && !git.HasCommit(r.Path, pr.HeadOid) {
+		if err := git.FetchPRHead(r.Path, pr.Number); err == nil {
+			unpushed, err = git.UnpushedCommits(r.Path, pr.HeadOid)
+			if err != nil {
+				v.detail = fmt.Sprintf("PR #%d merged%s, but cannot inspect (%v)", pr.Number, suffix, err)
+				return v
+			}
+		}
+	}
+	if unpushed > 0 {
+		v.detail = fmt.Sprintf("PR #%d merged%s, but %d unpushed commit(s)", pr.Number, suffix, unpushed)
+		return v
+	}
+	v.merged, v.detail = true, fmt.Sprintf("PR #%d merged%s", pr.Number, suffix)
 	return v
 }
 

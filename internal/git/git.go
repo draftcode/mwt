@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -60,6 +61,15 @@ func DefaultBase(dir, want string) (string, error) {
 	return head, nil
 }
 
+// MainWorktree returns the path of the repo a worktree belongs to.
+func MainWorktree(dir string) (string, error) {
+	common, err := Run(dir, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	if err != nil {
+		return "", err
+	}
+	return filepath.Dir(common), nil
+}
+
 // BranchExists reports whether a local branch of that name exists.
 func BranchExists(dir, branch string) bool {
 	_, err := Run(dir, "rev-parse", "--verify", "--quiet", "refs/heads/"+branch)
@@ -86,6 +96,9 @@ func RemoveWorktree(repoDir, path string, force bool) error {
 	return RunPassthrough(repoDir, append(args, path)...)
 }
 
+// DetachedHead is what git status reports as the branch when HEAD is detached.
+const DetachedHead = "(detached)"
+
 // Status summarizes a worktree's state relative to its upstream.
 type Status struct {
 	Branch      string
@@ -93,6 +106,11 @@ type Status struct {
 	Ahead       int
 	Behind      int
 	HasUpstream bool
+}
+
+// OnBranch reports whether the worktree has a branch checked out.
+func (s Status) OnBranch() bool {
+	return s.Branch != "" && s.Branch != DetachedHead
 }
 
 // Describe collects branch, dirty-file count and ahead/behind counts for a worktree.
@@ -122,6 +140,50 @@ func Describe(dir string) (Status, error) {
 	return s, nil
 }
 
+// HasCommit reports whether ref names a commit object present in dir.
+func HasCommit(dir, ref string) bool {
+	if ref == "" {
+		return false
+	}
+	_, err := Run(dir, "rev-parse", "--verify", "--quiet", ref+"^{commit}")
+	return err == nil
+}
+
+// FetchPRHead fetches the tip GitHub recorded for a pull request. Once the head
+// branch is deleted, refs/pull/<n>/head is the only place that commit survives,
+// and without it a squash-merged branch cannot be told from work never pushed.
+func FetchPRHead(dir string, number int) error {
+	_, err := Run(dir, "fetch", "--quiet", "origin", fmt.Sprintf("refs/pull/%d/head", number))
+	return err
+}
+
+// UnpushedCommits counts commits reachable from HEAD that no remote-tracking ref
+// contains, treating each ref in known as reachable too.
+//
+// This deliberately ignores the branch's upstream. A branch cut from origin/main
+// tracks origin/main for its whole life, so its ahead count is just "commits on
+// this branch" — pushing the branch to origin/<branch> never brings it back to
+// zero, and every branch with a commit reads as unpushed.
+func UnpushedCommits(dir string, known ...string) (int, error) {
+	args := []string{"rev-list", "--count", "HEAD"}
+	for _, ref := range known {
+		// An unknown ref would abort rev-list, and a PR head is routinely absent
+		// locally (never fetched, or dropped when the remote branch was deleted).
+		if !HasCommit(dir, ref) {
+			continue
+		}
+		args = append(args, "^"+ref)
+	}
+	// --not must come last: it flips the sense of every ref after it, so the ^refs
+	// above would turn into inclusions if they trailed it.
+	args = append(args, "--not", "--remotes")
+	out, err := Run(dir, args...)
+	if err != nil {
+		return 0, err
+	}
+	return strconv.Atoi(out)
+}
+
 // HasUnpushedWork reports whether the worktree has local changes that would be lost.
 func HasUnpushedWork(dir string) (bool, string, error) {
 	s, err := Describe(dir)
@@ -132,16 +194,12 @@ func HasUnpushedWork(dir string) (bool, string, error) {
 	if s.Dirty > 0 {
 		reasons = append(reasons, fmt.Sprintf("%d uncommitted file(s)", s.Dirty))
 	}
-	switch {
-	case s.HasUpstream && s.Ahead > 0:
-		reasons = append(reasons, fmt.Sprintf("%d unpushed commit(s)", s.Ahead))
-	case !s.HasUpstream:
-		base, err := DefaultBase(dir, "origin/HEAD")
-		if err == nil {
-			if commits, err := Run(dir, "log", "--oneline", base+"..HEAD"); err == nil && commits != "" {
-				reasons = append(reasons, fmt.Sprintf("%d commit(s) not on %s", len(strings.Split(commits, "\n")), base))
-			}
-		}
+	n, err := UnpushedCommits(dir)
+	if err != nil {
+		return false, "", err
+	}
+	if n > 0 {
+		reasons = append(reasons, fmt.Sprintf("%d unpushed commit(s)", n))
 	}
 	return len(reasons) > 0, strings.Join(reasons, ", "), nil
 }

@@ -20,10 +20,11 @@ var ErrUnavailable = errors.New("gh unavailable")
 
 // PR is the pull request opened from a worktree's branch, if there is one.
 type PR struct {
-	Number int
-	State  string // OPEN, MERGED, CLOSED, or DRAFT for an open draft
-	Checks string // passing, failing, pending, or "" when no checks ran
-	URL    string
+	Number  int
+	State   string // OPEN, MERGED, CLOSED, or DRAFT for an open draft
+	Checks  string // passing, failing, pending, or "" when no checks ran
+	URL     string
+	HeadOid string // commit the PR points at, used to tell merged work from stray work
 }
 
 type prJSON struct {
@@ -31,6 +32,7 @@ type prJSON struct {
 	State             string `json:"state"`
 	IsDraft           bool   `json:"isDraft"`
 	URL               string `json:"url"`
+	HeadRefOid        string `json:"headRefOid"`
 	StatusCheckRollup []struct {
 		// CheckRun reports status+conclusion; StatusContext reports state.
 		Status     string `json:"status"`
@@ -54,7 +56,7 @@ func Lookup(dir, branch string) (*PR, error) {
 		"--head", branch,
 		"--state", "all",
 		"--limit", "1",
-		"--json", "number,state,isDraft,url,statusCheckRollup",
+		"--json", "number,state,isDraft,url,headRefOid,statusCheckRollup",
 	)
 	cmd.Dir = dir
 	out, err := cmd.Output()
@@ -75,7 +77,7 @@ func Lookup(dir, branch string) (*PR, error) {
 	if p.IsDraft && state == "OPEN" {
 		state = "DRAFT"
 	}
-	return &PR{Number: p.Number, State: state, Checks: rollup(p), URL: p.URL}, nil
+	return &PR{Number: p.Number, State: state, Checks: rollup(p), URL: p.URL, HeadOid: p.HeadRefOid}, nil
 }
 
 // rollup collapses the per-check results into one word. Failing wins over

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -86,6 +87,13 @@ type removalOpts struct {
 func removeWorkspace(ws *workspace.Workspace, opts removalOpts) error {
 	var errs []error
 	for _, r := range ws.Repos {
+		// Read the branch while the worktree still exists, and prefer it over the
+		// recorded name: the checked-out branch is the one the removal was judged
+		// against, and the recorded one may belong to work that is still live.
+		branch := ws.Branch
+		if s, err := git.Describe(r.Path); err == nil && s.OnBranch() {
+			branch = s.Branch
+		}
 		if err := git.RemoveWorktree(r.Source, r.Path, opts.force); err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", r.Name, err))
 			continue
@@ -95,7 +103,7 @@ func removeWorkspace(ws *workspace.Workspace, opts removalOpts) error {
 			if opts.force || opts.forceDeleteBranch {
 				flag = "-D"
 			}
-			if err := git.RunPassthrough(r.Source, "branch", flag, ws.Branch); err != nil {
+			if err := git.RunPassthrough(r.Source, "branch", flag, branch); err != nil {
 				errs = append(errs, fmt.Errorf("%s: delete branch: %w", r.Name, err))
 			}
 		}
@@ -103,7 +111,31 @@ func removeWorkspace(ws *workspace.Workspace, opts removalOpts) error {
 	if len(errs) > 0 {
 		return errors.Join(errs...)
 	}
+	// Nothing that still looks like a repo may be deleted as a plain directory:
+	// whatever is left was never detached from its source, so removing it would
+	// take the work with it and strand the registration.
+	if left, err := leftoverRepos(ws.Root); err != nil {
+		return err
+	} else if len(left) > 0 {
+		return fmt.Errorf("refusing to delete %s: unrecognized worktree(s) remain: %s",
+			ws.Root, strings.Join(left, ", "))
+	}
 	return os.RemoveAll(ws.Root)
+}
+
+// leftoverRepos names the directories under root that are still git worktrees.
+func leftoverRepos(root string) ([]string, error) {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, e := range entries {
+		if e.IsDir() && git.IsRepo(filepath.Join(root, e.Name())) {
+			out = append(out, e.Name())
+		}
+	}
+	return out, nil
 }
 
 func confirm(cmd *cobra.Command, prompt string) bool {

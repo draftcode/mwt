@@ -53,10 +53,19 @@ func AddRepos(cfg *config.Config, ws *Workspace, repos []string, opts AddOptions
 	var (
 		mu     sync.Mutex
 		wg     sync.WaitGroup
-		added  []Repo
 		errs   []error
 		outBuf = map[string]*strings.Builder{}
 	)
+	// record persists a repo the moment its worktree exists, before the slow
+	// hydration steps. Recording only at the end loses the whole workspace's
+	// bookkeeping to one failed setup command or one interrupt, leaving worktrees
+	// on disk that mwt cannot see and will not protect.
+	record := func(r Repo) error {
+		mu.Lock()
+		defer mu.Unlock()
+		ws.Repos = append(ws.Repos, r)
+		return ws.Save()
+	}
 	for _, t := range targets {
 		outBuf[t.name] = &strings.Builder{}
 		wg.Add(1)
@@ -64,15 +73,11 @@ func AddRepos(cfg *config.Config, ws *Workspace, repos []string, opts AddOptions
 			defer wg.Done()
 			log := outBuf[name]
 			path := filepath.Join(ws.Root, name)
-			if err := addOne(cfg, ws, name, source, path, opts, log); err != nil {
+			if err := addOne(cfg, ws, name, source, path, opts, record, log); err != nil {
 				mu.Lock()
 				errs = append(errs, fmt.Errorf("%s: %w", name, err))
 				mu.Unlock()
-				return
 			}
-			mu.Lock()
-			added = append(added, Repo{Name: name, Source: source, Path: path})
-			mu.Unlock()
 		}(t.name, t.source)
 	}
 	wg.Wait()
@@ -84,15 +89,10 @@ func AddRepos(cfg *config.Config, ws *Workspace, repos []string, opts AddOptions
 			}
 		}
 	}
-
-	ws.Repos = append(ws.Repos, added...)
-	if err := ws.Save(); err != nil {
-		errs = append(errs, err)
-	}
 	return errors.Join(errs...)
 }
 
-func addOne(cfg *config.Config, ws *Workspace, name, source, path string, opts AddOptions, log *strings.Builder) error {
+func addOne(cfg *config.Config, ws *Workspace, name, source, path string, opts AddOptions, record func(Repo) error, log *strings.Builder) error {
 	rc := cfg.ForRepo(name)
 
 	if opts.Fetch {
@@ -117,6 +117,9 @@ func addOne(cfg *config.Config, ws *Workspace, name, source, path string, opts A
 		return err
 	}
 	fmt.Fprintf(log, "worktree %s (%s from %s)\n", path, ws.Branch, base)
+	if err := record(Repo{Name: name, Source: source, Path: path}); err != nil {
+		return err
+	}
 
 	for _, pattern := range rc.Copy {
 		if err := transfer(source, path, pattern, false, log); err != nil {
