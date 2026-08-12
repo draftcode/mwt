@@ -6,6 +6,7 @@ package git
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -195,5 +196,78 @@ func TestHasUnpushedWorkReportsDirtyFiles(t *testing.T) {
 	}
 	if !has || reason != "1 uncommitted file(s)" {
 		t.Errorf("got (%v, %q), want (true, \"1 uncommitted file(s)\")", has, reason)
+	}
+}
+
+// addSubmodule wires origin/sub into dir as an initialized submodule and pushes
+// the result, so a worktree cut from the branch populates it too.
+func addSubmodule(t *testing.T, dir string) {
+	t.Helper()
+	sub := filepath.Join(t.TempDir(), "sub")
+	mustRun(t, dir, "init", "--bare", "--initial-branch=main", sub)
+	seed := filepath.Join(t.TempDir(), "seed")
+	mustRun(t, dir, "clone", sub, seed)
+	mustRun(t, seed, "config", "user.email", "test@test.invalid")
+	mustRun(t, seed, "config", "user.name", "test")
+	commit(t, seed, "sub base")
+	mustRun(t, seed, "push", "-u", "origin", "main")
+
+	mustRun(t, dir, "-c", "protocol.file.allow=always", "submodule", "add", sub, "submodules/dep")
+	mustRun(t, dir, "commit", "-m", "add submodule")
+}
+
+// worktreeWithSubmodule cuts a worktree and populates its submodule, which is
+// what puts the submodule gitdir under the worktree's own admin directory.
+func worktreeWithSubmodule(t *testing.T, dir, branch string) string {
+	t.Helper()
+	wt := filepath.Join(t.TempDir(), "wt")
+	mustRun(t, dir, "worktree", "add", "-b", branch, wt, "HEAD")
+	mustRun(t, wt, "-c", "protocol.file.allow=always", "submodule", "update", "--init", "--recursive")
+	return wt
+}
+
+// git refuses to remove a worktree with an initialized submodule. The check is
+// waved through by its --force, which would discard uncommitted work too, so
+// mwt has to clear the worktree itself before forcing.
+func TestRemoveWorktreeWithSubmodule(t *testing.T) {
+	dir := newRepo(t)
+	addSubmodule(t, dir)
+	wt := worktreeWithSubmodule(t, dir, "topic")
+
+	if _, err := Run(dir, "worktree", "remove", wt); err == nil {
+		t.Fatal("git removed the worktree on its own, the test proves nothing")
+	}
+
+	if err := RemoveWorktree(dir, wt, false); err != nil {
+		t.Fatalf("RemoveWorktree: %v", err)
+	}
+	if _, err := os.Stat(wt); !os.IsNotExist(err) {
+		t.Errorf("worktree directory still present: %v", err)
+	}
+	if out := mustRun(t, dir, "worktree", "list"); strings.Contains(out, wt) {
+		t.Errorf("worktree still registered:\n%s", out)
+	}
+}
+
+// Forcing past the submodule check would take uncommitted work with it, so an
+// unforced removal has to stop instead.
+func TestRemoveWorktreeWithSubmoduleKeepsDirtyWork(t *testing.T) {
+	dir := newRepo(t)
+	addSubmodule(t, dir)
+	wt := worktreeWithSubmodule(t, dir, "topic")
+	write(t, wt, "uncommitted.txt")
+
+	if err := RemoveWorktree(dir, wt, false); err == nil {
+		t.Fatal("RemoveWorktree discarded uncommitted work")
+	}
+	if _, err := os.Stat(wt); err != nil {
+		t.Errorf("worktree was removed anyway: %v", err)
+	}
+
+	if err := RemoveWorktree(dir, wt, true); err != nil {
+		t.Fatalf("RemoveWorktree with force: %v", err)
+	}
+	if _, err := os.Stat(wt); !os.IsNotExist(err) {
+		t.Errorf("worktree directory still present: %v", err)
 	}
 }

@@ -87,13 +87,38 @@ func AddWorktree(repoDir, path, branch, base string) error {
 	return RunPassthrough(repoDir, args...)
 }
 
+// submoduleRefusal is how git declines to remove a worktree holding an
+// initialized submodule: it will not try to clean up the submodule's separate
+// gitdir. The check sits behind git's own --force, alongside the dirty and
+// locked ones, so the only way past it is to force the removal.
+const submoduleRefusal = "working trees containing submodules cannot be moved or removed"
+
 // RemoveWorktree detaches a worktree from its repo.
 func RemoveWorktree(repoDir, path string, force bool) error {
+	_, err := Run(repoDir, removeArgs(path, force)...)
+	if err == nil || force || !strings.Contains(err.Error(), submoduleRefusal) {
+		return err
+	}
+
+	// Forcing past the submodule check would also wave through uncommitted work,
+	// which the caller did not ask for, so stand in for the check git skips.
+	s, describeErr := Describe(path)
+	if describeErr != nil {
+		return fmt.Errorf("cannot inspect %s: %w", path, describeErr)
+	}
+	if s.Dirty > 0 {
+		return fmt.Errorf("%s holds %d uncommitted file(s); re-run with --force to discard", path, s.Dirty)
+	}
+	_, err = Run(repoDir, removeArgs(path, true)...)
+	return err
+}
+
+func removeArgs(path string, force bool) []string {
 	args := []string{"worktree", "remove"}
 	if force {
 		args = append(args, "--force")
 	}
-	return RunPassthrough(repoDir, append(args, path)...)
+	return append(args, path)
 }
 
 // DetachedHead is what git status reports as the branch when HEAD is detached.
