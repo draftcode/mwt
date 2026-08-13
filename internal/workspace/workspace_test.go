@@ -133,6 +133,93 @@ func TestLoadKeepsRecordedRepoWithMissingDirectory(t *testing.T) {
 	}
 }
 
+func TestFindByBranchPicksTheMatchingWorktree(t *testing.T) {
+	root := t.TempDir()
+	source := srcRepo(t, root, "widget")
+	cfg := testConfig(root, nil)
+	for _, name := range []string{"feat/one", "feat/two"} {
+		ws := newWorkspace(t, cfg, name)
+		if err := git.AddWorktree(source, filepath.Join(ws.Root, "widget"), name, "main"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	matches, err := FindByBranch(cfg, "feat/two", "widget")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 1 {
+		t.Fatalf("got %d matches, want 1: %+v", len(matches), matches)
+	}
+	if want := filepath.Join(cfg.WorktreeRoot, "feat-two", "widget"); matches[0].Path != want {
+		t.Errorf("path = %q, want %q", matches[0].Path, want)
+	}
+}
+
+// Stacking a branch inside a workspace leaves the worktree on a branch the
+// metadata never mentions, and that branch is the one a pull request names.
+func TestFindByBranchFollowsTheCheckoutNotTheMetadata(t *testing.T) {
+	root := t.TempDir()
+	source := srcRepo(t, root, "widget")
+	cfg := testConfig(root, nil)
+	ws := newWorkspace(t, cfg, "feat/base")
+	path := filepath.Join(ws.Root, "widget")
+	if err := git.AddWorktree(source, path, "feat/base", "main"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git.Run(path, "checkout", "-b", "feat/stacked"); err != nil {
+		t.Fatal(err)
+	}
+
+	matches, err := FindByBranch(cfg, "feat/stacked", "widget")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 1 {
+		t.Fatalf("got %d matches, want the stacked branch found: %+v", len(matches), matches)
+	}
+	if matches[0].Path != path {
+		t.Errorf("path = %q, want %q", matches[0].Path, path)
+	}
+
+	stale, err := FindByBranch(cfg, "feat/base", "widget")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stale) != 0 {
+		t.Errorf("recorded branch still matched after checkout moved: %+v", stale)
+	}
+}
+
+func TestFindByBranchNarrowsToRepo(t *testing.T) {
+	root := t.TempDir()
+	widget := srcRepo(t, root, "widget")
+	gadget := srcRepo(t, root, "gadget")
+	cfg := testConfig(root, nil)
+	ws := newWorkspace(t, cfg, "feat/both")
+	for _, s := range []string{widget, gadget} {
+		if err := git.AddWorktree(s, filepath.Join(ws.Root, filepath.Base(s)), "feat/both", "main"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	all, err := FindByBranch(cfg, "feat/both", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("got %d matches, want both repos: %+v", len(all), all)
+	}
+
+	one, err := FindByBranch(cfg, "feat/both", "gadget")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(one) != 1 || one[0].Repo != "gadget" {
+		t.Errorf("repo filter returned %+v", one)
+	}
+}
+
 // A plain directory is not a worktree and must not be adopted as one.
 func TestLoadIgnoresNonRepoDirectory(t *testing.T) {
 	root := t.TempDir()

@@ -122,6 +122,22 @@ already checked out in the workspace. `bash`, `fish`, and `powershell` work the 
 mw() { cd "$(mwt path "$@")" }        # mw feat/search [repo]
 ```
 
+`mwt path --pr` takes a pull request URL or number instead, resolving it to the
+worktree holding the branch it was opened from — useful when a review link is all you
+have and the workspace name is not obvious:
+
+```zsh
+mwt path --pr https://github.com/acme/widget/pull/446
+# → ~/worktrees/fix-flaky-login/widget
+
+mwpr() { local p; p=$(mwt path --pr "$1") || return; cd "$p" }
+```
+
+The branch comes from `gh`, and the match is made against each worktree's actual
+checkout, so a branch stacked inside an existing workspace resolves too. It exits
+nonzero when no worktree holds the branch, rather than falling back to the canonical
+checkout.
+
 `mwt list --json` prints every workspace with its root, branch, and repo paths, for
 scripting against. Bound to a key with `fzf`, it becomes a jump-to-worktree shortcut:
 
