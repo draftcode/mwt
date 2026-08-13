@@ -131,6 +131,42 @@ func List(cfg *config.Config) ([]*Workspace, error) {
 	return out, nil
 }
 
+// Match is one worktree located by a search across workspaces.
+type Match struct {
+	Workspace string
+	Repo      string
+	Path      string
+	Branch    string
+}
+
+// FindByBranch returns every worktree checked out on branch, restricted to a
+// single repo name when repo is non-empty.
+func FindByBranch(cfg *config.Config, branch, repo string) ([]Match, error) {
+	all, err := List(cfg)
+	if err != nil {
+		return nil, err
+	}
+	var out []Match
+	for _, ws := range all {
+		for _, r := range ws.Repos {
+			if repo != "" && r.Name != repo {
+				continue
+			}
+			// A worktree can sit on a branch of its own, so the checkout wins over
+			// the workspace's recorded branch.
+			current := ws.Branch
+			if s, err := git.Describe(r.Path); err == nil && s.Branch != "" {
+				current = s.Branch
+			}
+			if current != branch {
+				continue
+			}
+			out = append(out, Match{Workspace: ws.Name, Repo: r.Name, Path: r.Path, Branch: current})
+		}
+	}
+	return out, nil
+}
+
 // Find resolves a workspace by name, or by the current directory when name is empty.
 func Find(cfg *config.Config, name string) (*Workspace, error) {
 	if name == "" {

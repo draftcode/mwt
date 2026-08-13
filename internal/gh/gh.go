@@ -10,7 +10,11 @@ package gh
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os/exec"
+	"path"
+	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -78,6 +82,85 @@ func Lookup(dir, branch string) (*PR, error) {
 		state = "DRAFT"
 	}
 	return &PR{Number: p.Number, State: state, Checks: rollup(p), URL: p.URL, HeadOid: p.HeadRefOid}, nil
+}
+
+// Ref identifies a pull request. Repo is "owner/name", or empty when the
+// reference carried no repo and gh must infer one from the working directory.
+type Ref struct {
+	Repo   string
+	Number int
+}
+
+var prURL = regexp.MustCompile(`^(?:https?://)?[^/\s]*github\.com/([^/\s]+/[^/\s]+)/pull/(\d+)`)
+
+// ParseRef reads a pull request URL, an owner/name#number pair, or a bare number.
+// Trailing URL segments such as /files or a #discussion anchor are ignored.
+func ParseRef(s string) (Ref, error) {
+	s = strings.TrimSpace(s)
+	if m := prURL.FindStringSubmatch(s); m != nil {
+		n, err := strconv.Atoi(m[2])
+		if err != nil || n <= 0 {
+			return Ref{}, fmt.Errorf("pull request number in %q is not a positive integer", s)
+		}
+		return Ref{Repo: m[1], Number: n}, nil
+	}
+	if repo, num, ok := strings.Cut(s, "#"); ok && strings.Count(repo, "/") == 1 {
+		if n, err := strconv.Atoi(num); err == nil && n > 0 {
+			return Ref{Repo: repo, Number: n}, nil
+		}
+	}
+	if n, err := strconv.Atoi(strings.TrimPrefix(s, "#")); err == nil && n > 0 {
+		return Ref{Number: n}, nil
+	}
+	return Ref{}, fmt.Errorf("cannot read %q as a pull request URL or number", s)
+}
+
+// Head is the branch a pull request was opened from, and the short name of the
+// repo holding it.
+type Head struct {
+	Branch string
+	Repo   string
+}
+
+// LookupHead resolves a pull request to the branch it was opened from, running gh
+// in dir so a ref without a repo can still be inferred from the checkout there.
+func LookupHead(dir string, ref Ref) (Head, error) {
+	if !Available() {
+		return Head{}, ErrUnavailable
+	}
+	args := []string{"pr", "view", strconv.Itoa(ref.Number), "--json", "headRefName,headRepository"}
+	if ref.Repo != "" {
+		args = append(args, "--repo", ref.Repo)
+	}
+	cmd := exec.Command("gh", args...)
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		var exit *exec.ExitError
+		if errors.As(err, &exit) && len(exit.Stderr) > 0 {
+			return Head{}, fmt.Errorf("gh pr view %d: %s", ref.Number, strings.TrimSpace(string(exit.Stderr)))
+		}
+		return Head{}, fmt.Errorf("gh pr view %d: %w", ref.Number, err)
+	}
+	var view struct {
+		HeadRefName    string `json:"headRefName"`
+		HeadRepository struct {
+			Name string `json:"name"`
+		} `json:"headRepository"`
+	}
+	if err := json.Unmarshal(out, &view); err != nil {
+		return Head{}, err
+	}
+	if view.HeadRefName == "" {
+		return Head{}, fmt.Errorf("pull request %d reports no head branch", ref.Number)
+	}
+	// The head repo is the fork for a cross-repo pull request; worktrees follow the
+	// repo the pull request targets.
+	name := view.HeadRepository.Name
+	if ref.Repo != "" {
+		name = path.Base(ref.Repo)
+	}
+	return Head{Branch: view.HeadRefName, Repo: name}, nil
 }
 
 // rollup collapses the per-check results into one word. Failing wins over
