@@ -52,9 +52,13 @@ never touched, and a checkout sitting on some other branch is skipped. The fast-
 itself is left to git, so a diverged branch or a conflicting local edit is reported and the
 run exits non-zero instead of anything being overwritten.
 
+The output is grouped by outcome — up to date / synced, on another branch, no origin
+remote, skipped, failed — so a few dozen healthy repos collapse into one block and the
+ones needing attention stand on their own. Empty groups are not printed.
+
 The repos are fetched 8 at a time, which on a few dozen of them is the difference between
 seconds and half a minute. A terminal gets a progress line while they run; redirected
-output does not, and the table is ordered by repo either way.
+output does not, and repos are ordered by name within each group either way.
 
 `mwt prune` removes every workspace where each repo's branch has a MERGED pull request,
 asked in one confirmation. A repo with no PR, an open or closed-unmerged PR, uncommitted

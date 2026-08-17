@@ -5,6 +5,7 @@ package cmd
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -44,18 +45,16 @@ diverged or dirty checkout is reported rather than overwritten.`,
 			if err != nil {
 				return err
 			}
-			lines := syncAll(repos, opts, newProgress(cmd.ErrOrStderr(), len(repos)))
+			results := syncAll(repos, opts, newProgress(cmd.ErrOrStderr(), len(repos)))
 
-			w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
+			if err := renderSync(cmd.OutOrStdout(), repos, results); err != nil {
+				return err
+			}
 			failed := 0
-			for i, r := range repos {
-				if strings.HasPrefix(lines[i], "error\t") {
+			for _, r := range results {
+				if r.kind == syncFailed {
 					failed++
 				}
-				fmt.Fprintf(w, "%s\t%s\n", r.name, lines[i])
-			}
-			if err := w.Flush(); err != nil {
-				return err
 			}
 			if failed > 0 {
 				return fmt.Errorf("%d repo(s) could not be synced", failed)
@@ -67,12 +66,39 @@ diverged or dirty checkout is reported rather than overwritten.`,
 	return cmd
 }
 
-// syncAll runs the repos concurrently and returns their result lines in the
-// order given, so the table reads the same whatever order they finish in.
-// Every repo is its own git dir, so the fetches do not contend; the run is
-// network-bound, which is what the fan-out buys.
-func syncAll(repos []syncTarget, opts *syncOptions, p *progress) []string {
-	lines := make([]string, len(repos))
+// syncKind is the outcome category a repo lands in, which is also the order the
+// groups are printed in.
+type syncKind int
+
+const (
+	syncSynced syncKind = iota
+	syncOtherBranch
+	syncNoRemote
+	syncSkipped
+	syncFailed
+)
+
+var syncHeadings = map[syncKind]string{
+	syncSynced:      "up to date / synced",
+	syncOtherBranch: "on another branch",
+	syncNoRemote:    "no origin remote",
+	syncSkipped:     "skipped",
+	syncFailed:      "failed",
+}
+
+// syncResult is one repo's outcome. detail holds the tab-separated columns
+// printed after the repo name, and is empty when the heading says it all.
+type syncResult struct {
+	kind   syncKind
+	detail string
+}
+
+// syncAll runs the repos concurrently and returns their results in the order
+// given, so the output reads the same whatever order they finish in. Every repo
+// is its own git dir, so the fetches do not contend; the run is network-bound,
+// which is what the fan-out buys.
+func syncAll(repos []syncTarget, opts *syncOptions, p *progress) []syncResult {
+	results := make([]syncResult, len(repos))
 	sem := make(chan struct{}, maxConcurrency)
 	var wg sync.WaitGroup
 	for i, r := range repos {
@@ -81,13 +107,47 @@ func syncAll(repos []syncTarget, opts *syncOptions, p *progress) []string {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			lines[i] = syncRepo(r.path, opts)
+			results[i] = syncRepo(r.path, opts)
 			p.done(r.name)
 		}(i, r)
 	}
 	wg.Wait()
 	p.clear()
-	return lines
+	return results
+}
+
+// renderSync prints one section per outcome category, each column-aligned on its
+// own so a long error message does not pad the rows of a healthy group.
+func renderSync(out io.Writer, repos []syncTarget, results []syncResult) error {
+	first := true
+	for _, kind := range []syncKind{syncSynced, syncOtherBranch, syncNoRemote, syncSkipped, syncFailed} {
+		var idx []int
+		for i, r := range results {
+			if r.kind == kind {
+				idx = append(idx, i)
+			}
+		}
+		if len(idx) == 0 {
+			continue
+		}
+		if !first {
+			fmt.Fprintln(out)
+		}
+		first = false
+		fmt.Fprintf(out, "%s (%d)\n", syncHeadings[kind], len(idx))
+		w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+		for _, i := range idx {
+			if results[i].detail == "" {
+				fmt.Fprintf(w, "  %s\n", repos[i].name)
+				continue
+			}
+			fmt.Fprintf(w, "  %s\t%s\n", repos[i].name, results[i].detail)
+		}
+		if err := w.Flush(); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 type syncTarget struct {
@@ -147,46 +207,46 @@ func syncTargets(args []string) ([]syncTarget, error) {
 	return out, nil
 }
 
-// syncRepo brings one checkout's default branch up to the remote and returns a
-// one-line account of what happened.
-func syncRepo(path string, opts *syncOptions) string {
+// syncRepo brings one checkout's default branch up to the remote and reports
+// which category the repo ended up in.
+func syncRepo(path string, opts *syncOptions) syncResult {
 	if !git.RemoteExists(path, syncRemote) {
-		return fmt.Sprintf("skipped\tno %s remote", syncRemote)
+		return syncResult{kind: syncNoRemote}
 	}
 	if !opts.noFetch {
 		if err := git.Fetch(path, syncRemote); err != nil {
-			return fmt.Sprintf("error\tfetch failed: %v", err)
+			return syncResult{kind: syncFailed, detail: fmt.Sprintf("fetch failed: %v", oneLine(err.Error()))}
 		}
 	}
 
 	def, err := git.DefaultBranch(path, syncRemote)
 	if err != nil {
-		return fmt.Sprintf("skipped\t%v", err)
+		return syncResult{kind: syncSkipped, detail: oneLine(err.Error())}
 	}
 	status, err := git.Describe(path)
 	if err != nil {
-		return fmt.Sprintf("error\t%v", err)
+		return syncResult{kind: syncFailed, detail: oneLine(err.Error())}
 	}
 	if !status.OnBranch() {
-		return fmt.Sprintf("skipped\tdetached HEAD (want %s)", def)
+		return syncResult{kind: syncOtherBranch, detail: fmt.Sprintf("detached HEAD\twant %s", def)}
 	}
 	if status.Branch != def {
-		return fmt.Sprintf("skipped\ton %s (want %s)", status.Branch, def)
+		return syncResult{kind: syncOtherBranch, detail: fmt.Sprintf("on %s\twant %s", status.Branch, def)}
 	}
 
 	target := syncRemote + "/" + def
 	before := git.ShortSHA(path, "HEAD")
 	behind := git.CountCommits(path, "HEAD.."+target)
 	if behind == 0 && git.ShortSHA(path, target) == before {
-		return fmt.Sprintf("%s\tup to date", def)
+		return syncResult{kind: syncSynced, detail: def + "\tup to date"}
 	}
 
 	// Let git arbitrate rather than pre-judging the working tree: it refuses a
 	// fast-forward that would discard local work, and its message says why.
 	if err := git.FastForward(path, target); err != nil {
-		return fmt.Sprintf("error\t%s", oneLine(err.Error()))
+		return syncResult{kind: syncFailed, detail: oneLine(err.Error())}
 	}
-	return fmt.Sprintf("%s\t%s -> %s (%d)", def, before, git.ShortSHA(path, "HEAD"), behind)
+	return syncResult{kind: syncSynced, detail: fmt.Sprintf("%s\t%s -> %s (%d)", def, before, git.ShortSHA(path, "HEAD"), behind)}
 }
 
 // oneLine collapses a multi-line git error so it cannot break the column layout.
