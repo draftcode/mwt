@@ -54,8 +54,8 @@ func TestSyncRepoFastForwards(t *testing.T) {
 
 	got := syncRepo(clone, &syncOptions{})
 
-	if !strings.Contains(got, "(1)") {
-		t.Errorf("want a 1-commit fast-forward, got %q", got)
+	if got.kind != syncSynced || !strings.Contains(got.detail, "(1)") {
+		t.Errorf("want a 1-commit fast-forward, got %+v", got)
 	}
 	if git.CountCommits(clone, "HEAD..origin/main") != 0 {
 		t.Error("checkout is still behind origin/main after sync")
@@ -68,8 +68,8 @@ func TestSyncRepoUpToDate(t *testing.T) {
 
 	got := syncRepo(clone, &syncOptions{})
 
-	if !strings.Contains(got, "up to date") {
-		t.Errorf("want up to date, got %q", got)
+	if got.kind != syncSynced || !strings.Contains(got.detail, "up to date") {
+		t.Errorf("want up to date, got %+v", got)
 	}
 }
 
@@ -81,8 +81,8 @@ func TestSyncRepoSkipsOtherBranch(t *testing.T) {
 
 	got := syncRepo(clone, &syncOptions{})
 
-	if !strings.Contains(got, "on topic") {
-		t.Errorf("want a skip naming the branch, got %q", got)
+	if got.kind != syncOtherBranch || !strings.Contains(got.detail, "on topic") {
+		t.Errorf("want a skip naming the branch, got %+v", got)
 	}
 }
 
@@ -92,8 +92,8 @@ func TestSyncRepoSkipsDetachedHead(t *testing.T) {
 
 	got := syncRepo(clone, &syncOptions{})
 
-	if !strings.Contains(got, "detached") {
-		t.Errorf("want a detached-HEAD skip, got %q", got)
+	if got.kind != syncOtherBranch || !strings.Contains(got.detail, "detached") {
+		t.Errorf("want a detached-HEAD skip, got %+v", got)
 	}
 }
 
@@ -106,11 +106,11 @@ func TestSyncRepoReportsDivergence(t *testing.T) {
 
 	got := syncRepo(clone, &syncOptions{})
 
-	if !strings.HasPrefix(got, "error") {
-		t.Errorf("want an error for a diverged branch, got %q", got)
+	if got.kind != syncFailed {
+		t.Errorf("want a failure for a diverged branch, got %+v", got)
 	}
-	if strings.Contains(got, "\n") {
-		t.Errorf("error must be one line or it breaks the column layout: %q", got)
+	if strings.Contains(got.detail, "\n") {
+		t.Errorf("error must be one line or it breaks the column layout: %q", got.detail)
 	}
 	if git.ShortSHA(clone, "HEAD") != local {
 		t.Error("diverged branch was moved")
@@ -127,8 +127,8 @@ func TestSyncRepoFastForwardsWithUntrackedFiles(t *testing.T) {
 
 	got := syncRepo(clone, &syncOptions{})
 
-	if !strings.Contains(got, "(1)") {
-		t.Errorf("want a fast-forward despite untracked files, got %q", got)
+	if got.kind != syncSynced || !strings.Contains(got.detail, "(1)") {
+		t.Errorf("want a fast-forward despite untracked files, got %+v", got)
 	}
 	if _, err := os.Stat(filepath.Join(clone, "scratch.log")); err != nil {
 		t.Errorf("untracked file did not survive: %v", err)
@@ -149,18 +149,18 @@ func TestSyncAllKeepsInputOrder(t *testing.T) {
 		repos = append(repos, syncTarget{name: fmt.Sprintf("repo%02d", i), path: clone})
 	}
 
-	lines := syncAll(repos, &syncOptions{}, newProgress(io.Discard, len(repos)))
+	results := syncAll(repos, &syncOptions{}, newProgress(io.Discard, len(repos)))
 
-	if len(lines) != len(repos) {
-		t.Fatalf("got %d lines for %d repos", len(lines), len(repos))
+	if len(results) != len(repos) {
+		t.Fatalf("got %d results for %d repos", len(results), len(repos))
 	}
 	for i := range repos {
 		want := "up to date"
 		if i%2 != 0 {
 			want = "(1)"
 		}
-		if !strings.Contains(lines[i], want) {
-			t.Errorf("repo%02d: want %q, got %q", i, want, lines[i])
+		if !strings.Contains(results[i].detail, want) {
+			t.Errorf("repo%02d: want %q, got %q", i, want, results[i].detail)
 		}
 	}
 }
@@ -186,8 +186,8 @@ func TestSyncRepoSkipsRepoWithoutOrigin(t *testing.T) {
 
 	got := syncRepo(dir, &syncOptions{})
 
-	if !strings.Contains(got, "no origin remote") {
-		t.Errorf("want a no-remote skip, got %q", got)
+	if got.kind != syncNoRemote {
+		t.Errorf("want a no-remote skip, got %+v", got)
 	}
 }
 
@@ -198,7 +198,41 @@ func TestSyncRepoNoFetchSkipsRemote(t *testing.T) {
 
 	got := syncRepo(clone, &syncOptions{noFetch: true})
 
-	if !strings.Contains(got, "up to date") {
-		t.Errorf("want up to date without fetching, got %q", got)
+	if got.kind != syncSynced || !strings.Contains(got.detail, "up to date") {
+		t.Errorf("want up to date without fetching, got %+v", got)
+	}
+}
+
+// The point of the grouping is that a reader sees the categories, not a repo
+// list: healthy repos collapse under one heading and the ones needing attention
+// sit under their own.
+func TestRenderSyncGroupsByCategory(t *testing.T) {
+	repos := []syncTarget{{name: "alpha"}, {name: "bravo"}, {name: "charlie"}, {name: "delta"}}
+	results := []syncResult{
+		{kind: syncSynced, detail: "main\tup to date"},
+		{kind: syncOtherBranch, detail: "on topic\twant main"},
+		{kind: syncNoRemote},
+		{kind: syncSynced, detail: "main\tabc123 -> def456 (2)"},
+	}
+
+	var buf bytes.Buffer
+	if err := renderSync(&buf, repos, results); err != nil {
+		t.Fatal(err)
+	}
+	got := buf.String()
+
+	for _, want := range []string{"up to date / synced (2)", "on another branch (1)", "no origin remote (1)"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("want heading %q in:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "skipped (") || strings.Contains(got, "failed (") {
+		t.Errorf("empty categories must not be printed:\n%s", got)
+	}
+	if !strings.Contains(got, "alpha") || !strings.Contains(got, "delta") {
+		t.Errorf("synced repos are missing:\n%s", got)
+	}
+	if strings.Index(got, "alpha") > strings.Index(got, "bravo") {
+		t.Errorf("synced group must come first:\n%s", got)
 	}
 }
