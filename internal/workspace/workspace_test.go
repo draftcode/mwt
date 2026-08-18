@@ -4,6 +4,7 @@
 package workspace
 
 import (
+	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
@@ -11,6 +12,8 @@ import (
 	"time"
 
 	"github.com/draftcode/mwt/internal/config"
+	"github.com/draftcode/mwt/internal/gh"
+	"github.com/draftcode/mwt/internal/ghstack"
 	"github.com/draftcode/mwt/internal/git"
 )
 
@@ -235,5 +238,119 @@ func TestLoadIgnoresNonRepoDirectory(t *testing.T) {
 	}
 	if len(reloaded.Repos) != 0 {
 		t.Errorf("adopted a non-repo directory: %+v", reloaded.Repos)
+	}
+}
+
+// writeStack records a gh stack state for a worktree. Each entry is a branch name
+// and the pull request URL opened from it, in stack order.
+func writeStack(t *testing.T, worktree string, prs map[string]string, order []string) {
+	t.Helper()
+	gitDir, err := git.Dir(worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	branches := make([]any, 0, len(order))
+	for _, name := range order {
+		b := map[string]any{"branch": name}
+		if url := prs[name]; url != "" {
+			b["pullRequest"] = map[string]any{"url": url}
+		}
+		branches = append(branches, b)
+	}
+	state := map[string]any{
+		"schemaVersion": 1,
+		"stacks":        []any{map[string]any{"branches": branches}},
+	}
+	data, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(gitDir, ghstack.StateFile), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// stacked builds a workspace whose single worktree carries a two-branch stack and
+// has the lower branch checked out, then returns the worktree path.
+func stacked(t *testing.T, cfg *config.Config, name, repo, lower, upper, lowerPR, upperPR string) string {
+	t.Helper()
+	source := srcRepo(t, filepath.Dir(cfg.RepoSearchPaths[0]), repo)
+	ws := newWorkspace(t, cfg, name)
+	path := filepath.Join(ws.Root, repo)
+	if err := git.AddWorktree(source, path, lower, "main"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git.Run(path, "branch", upper); err != nil {
+		t.Fatal(err)
+	}
+	writeStack(t, path, map[string]string{lower: lowerPR, upper: upperPR}, []string{lower, upper})
+	return path
+}
+
+// The whole point of the lookup: a review lands on a branch further up the stack,
+// which is not the one the worktree currently has checked out.
+func TestFindByPRLocatesABranchThatIsNotCheckedOut(t *testing.T) {
+	root := t.TempDir()
+	cfg := testConfig(root, nil)
+	path := stacked(t, cfg, "feat/base", "widget", "feat/base", "feat/top",
+		"https://github.com/acme/widget/pull/1", "https://github.com/acme/widget/pull/2")
+
+	ref, err := gh.ParseRef("https://github.com/acme/widget/pull/2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	matches, err := FindByPR(cfg, ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 1 {
+		t.Fatalf("got %d matches, want 1: %+v", len(matches), matches)
+	}
+	m := matches[0]
+	if m.Path != path {
+		t.Errorf("path = %q, want %q", m.Path, path)
+	}
+	if m.Branch != "feat/top" {
+		t.Errorf("branch = %q, want the pull request's branch feat/top", m.Branch)
+	}
+	if m.CheckedOut != "feat/base" {
+		t.Errorf("checked out = %q, want feat/base", m.CheckedOut)
+	}
+}
+
+// Pull request numbers repeat across repos, so a reference carrying a repo must
+// not match a same-numbered pull request somewhere else.
+func TestFindByPRRejectsTheSameNumberInAnotherRepo(t *testing.T) {
+	root := t.TempDir()
+	cfg := testConfig(root, nil)
+	stacked(t, cfg, "feat/base", "widget", "feat/base", "feat/top",
+		"https://github.com/acme/widget/pull/1", "https://github.com/acme/widget/pull/2")
+
+	ref, err := gh.ParseRef("https://github.com/acme/gadget/pull/2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	matches, err := FindByPR(cfg, ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 0 {
+		t.Errorf("matched another repo's pull request: %+v", matches)
+	}
+}
+
+// A branch resolved through gh is looked up the same way, so a stacked branch that
+// is not checked out still finds its worktree.
+func TestFindByBranchFindsAStackBranchNotCheckedOut(t *testing.T) {
+	root := t.TempDir()
+	cfg := testConfig(root, nil)
+	path := stacked(t, cfg, "feat/base", "widget", "feat/base", "feat/top", "", "")
+
+	matches, err := FindByBranch(cfg, "feat/top", "widget")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 1 || matches[0].Path != path {
+		t.Fatalf("got %+v, want the worktree at %s", matches, path)
 	}
 }

@@ -65,30 +65,67 @@ func pathForPR(cmd *cobra.Command, arg string) error {
 	if err != nil {
 		return err
 	}
-	dir, err := os.Getwd()
-	if err != nil {
-		return err
+	var matches []workspace.Match
+	// A bare number names no repo, so matching it against recorded pull requests
+	// would collide across repos; that case takes the gh route, which resolves the
+	// repo from the working directory.
+	if ref.Repo != "" {
+		if matches, err = workspace.FindByPR(cfg, ref); err != nil {
+			return err
+		}
 	}
-	head, err := gh.LookupHead(dir, ref)
-	if err != nil {
-		return err
+	subject := fmt.Sprintf("pull request %d", ref.Number)
+	if len(matches) == 0 {
+		// Nothing recorded locally: the stack state may predate the pull request, or
+		// the branch may not be stacked at all. Ask GitHub for its branch instead.
+		dir, err := os.Getwd()
+		if err != nil {
+			return err
+		}
+		head, err := gh.LookupHead(dir, ref)
+		if err != nil {
+			return err
+		}
+		if matches, err = workspace.FindByBranch(cfg, head.Branch, head.Repo); err != nil {
+			return err
+		}
+		subject = fmt.Sprintf("branch %s", head.Branch)
 	}
-	matches, err := workspace.FindByBranch(cfg, head.Branch, head.Repo)
-	if err != nil {
-		return err
-	}
+	matches = preferCheckedOut(matches)
 	switch len(matches) {
 	case 1:
-		fmt.Fprintln(cmd.OutOrStdout(), matches[0].Path)
+		m := matches[0]
+		fmt.Fprintln(cmd.OutOrStdout(), m.Path)
+		if m.CheckedOut != m.Branch {
+			fmt.Fprintf(cmd.ErrOrStderr(), "note: %s has %s checked out, not %s; run `gh stack checkout %d` there\n",
+				m.Repo, m.CheckedOut, m.Branch, ref.Number)
+		}
 		return nil
 	case 0:
-		return fmt.Errorf("no %s worktree on branch %s under %s", head.Repo, head.Branch, cfg.WorktreeRoot)
+		return fmt.Errorf("no worktree for %s under %s", subject, cfg.WorktreeRoot)
 	default:
 		var b strings.Builder
-		fmt.Fprintf(&b, "branch %s is checked out in %d worktrees:", head.Branch, len(matches))
+		fmt.Fprintf(&b, "%s is in %d worktrees:", subject, len(matches))
 		for _, m := range matches {
 			fmt.Fprintf(&b, "\n  %s\t(workspace %s)", m.Path, m.Workspace)
 		}
 		return errors.New(b.String())
 	}
+}
+
+// preferCheckedOut narrows a set of matches to the worktrees actually sitting on
+// the branch. A branch appears in every stack built on top of it, so the workspace
+// it was created in is told apart from the ones merely stacked above by which one
+// has it checked out.
+func preferCheckedOut(matches []workspace.Match) []workspace.Match {
+	var on []workspace.Match
+	for _, m := range matches {
+		if m.CheckedOut == m.Branch {
+			on = append(on, m)
+		}
+	}
+	if len(on) == 1 {
+		return on
+	}
+	return matches
 }
