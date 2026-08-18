@@ -45,3 +45,27 @@ func TestParseRefRejectsNonPullRequest(t *testing.T) {
 		}
 	}
 }
+
+func TestRefMatches(t *testing.T) {
+	url := "https://github.com/acme/widget/pull/7"
+	for _, tc := range []struct {
+		ref  Ref
+		want bool
+	}{
+		{Ref{Repo: "acme/widget", Number: 7}, true},
+		{Ref{Repo: "ACME/Widget", Number: 7}, true},
+		{Ref{Number: 7}, true},
+		{Ref{Repo: "acme/gadget", Number: 7}, false},
+		{Ref{Repo: "acme/widget", Number: 8}, false},
+	} {
+		if got := tc.ref.Matches(url); got != tc.want {
+			t.Errorf("%+v.Matches(%s) = %v, want %v", tc.ref, url, got, tc.want)
+		}
+	}
+}
+
+func TestRefMatchesRejectsNonPRURL(t *testing.T) {
+	if (Ref{Number: 7}).Matches("https://github.com/acme/widget/issues/7") {
+		t.Error("an issue URL matched a pull request reference")
+	}
+}

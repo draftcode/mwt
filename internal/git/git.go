@@ -127,6 +127,12 @@ func MainWorktree(dir string) (string, error) {
 	return filepath.Dir(common), nil
 }
 
+// Dir returns the git directory backing a worktree, which for a linked worktree
+// is its own directory under the repo's worktrees/, not the shared common dir.
+func Dir(dir string) (string, error) {
+	return Run(dir, "rev-parse", "--path-format=absolute", "--git-dir")
+}
+
 // BranchExists reports whether a local branch of that name exists.
 func BranchExists(dir, branch string) bool {
 	_, err := Run(dir, "rev-parse", "--verify", "--quiet", "refs/heads/"+branch)

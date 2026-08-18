@@ -137,10 +137,12 @@ mwt path --pr https://github.com/acme/widget/pull/446
 mwpr() { local p; p=$(mwt path --pr "$1") || return; cd "$p" }
 ```
 
-The branch comes from `gh`, and the match is made against each worktree's actual
-checkout, so a branch stacked inside an existing workspace resolves too. It exits
-nonzero when no worktree holds the branch, rather than falling back to the canonical
-checkout.
+The match is made against the `gh stack` state each worktree keeps, so any branch of
+a stack resolves, not just the one currently checked out; when the pull request is
+not recorded in any stack, `gh` is asked for its branch and the checkouts are
+searched instead. A branch that is not the checkout is still printed, with a note on
+stderr saying which `gh stack checkout` to run. It exits nonzero when no worktree
+holds the branch, rather than falling back to the canonical checkout.
 
 `mwt list --json` prints every workspace with its root, branch, and repo paths, for
 scripting against. Bound to a key with `fzf`, it becomes a jump-to-worktree shortcut:

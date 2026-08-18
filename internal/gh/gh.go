@@ -115,6 +115,19 @@ func ParseRef(s string) (Ref, error) {
 	return Ref{}, fmt.Errorf("cannot read %q as a pull request URL or number", s)
 }
 
+// Matches reports whether url names the same pull request as the reference. A
+// reference that carried no repo matches on number alone.
+func (r Ref) Matches(url string) bool {
+	other, err := ParseRef(url)
+	if err != nil {
+		return false
+	}
+	if other.Number != r.Number {
+		return false
+	}
+	return r.Repo == "" || strings.EqualFold(r.Repo, other.Repo)
+}
+
 // Head is the branch a pull request was opened from, and the short name of the
 // repo holding it.
 type Head struct {

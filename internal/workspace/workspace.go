@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/draftcode/mwt/internal/config"
+	"github.com/draftcode/mwt/internal/gh"
+	"github.com/draftcode/mwt/internal/ghstack"
 	"github.com/draftcode/mwt/internal/git"
 )
 
@@ -131,17 +133,52 @@ func List(cfg *config.Config) ([]*Workspace, error) {
 	return out, nil
 }
 
-// Match is one worktree located by a search across workspaces.
+// Match is one worktree located by a search across workspaces. Branch is the
+// branch the search matched, which is not always the one CheckedOut: a stack
+// keeps several branches in a single worktree.
 type Match struct {
-	Workspace string
-	Repo      string
-	Path      string
-	Branch    string
+	Workspace  string
+	Repo       string
+	Path       string
+	Branch     string
+	CheckedOut string
 }
 
-// FindByBranch returns every worktree checked out on branch, restricted to a
-// single repo name when repo is non-empty.
+// FindByBranch returns every worktree holding branch, restricted to a single repo
+// name when repo is non-empty. A worktree holds a branch when it has it checked
+// out or when gh stack tracks it there, so a branch further down a stack still
+// resolves to the worktree it was created in.
 func FindByBranch(cfg *config.Config, branch, repo string) ([]Match, error) {
+	return search(cfg, repo, func(current string, stack []ghstack.Branch) (string, bool) {
+		if current == branch {
+			return branch, true
+		}
+		for _, b := range stack {
+			if b.Name == branch {
+				return branch, true
+			}
+		}
+		return "", false
+	})
+}
+
+// FindByPR returns every worktree whose gh stack state records the pull request,
+// whatever branch the worktree currently has checked out.
+func FindByPR(cfg *config.Config, ref gh.Ref) ([]Match, error) {
+	return search(cfg, "", func(current string, stack []ghstack.Branch) (string, bool) {
+		for _, b := range stack {
+			if b.PRURL != "" && ref.Matches(b.PRURL) {
+				return b.Name, true
+			}
+		}
+		return "", false
+	})
+}
+
+// search walks every worktree of every workspace and collects the ones keep
+// accepts, given the checked-out branch and the stack gh stack tracks there. keep
+// returns the branch the match is about, which need not be the checked-out one.
+func search(cfg *config.Config, repo string, keep func(current string, stack []ghstack.Branch) (string, bool)) ([]Match, error) {
 	all, err := List(cfg)
 	if err != nil {
 		return nil, err
@@ -158,10 +195,13 @@ func FindByBranch(cfg *config.Config, branch, repo string) ([]Match, error) {
 			if s, err := git.Describe(r.Path); err == nil && s.Branch != "" {
 				current = s.Branch
 			}
-			if current != branch {
+			// An unreadable stack is one worktree's problem, not the search's.
+			stack, _ := ghstack.Branches(r.Path)
+			branch, ok := keep(current, stack)
+			if !ok {
 				continue
 			}
-			out = append(out, Match{Workspace: ws.Name, Repo: r.Name, Path: r.Path, Branch: current})
+			out = append(out, Match{Workspace: ws.Name, Repo: r.Name, Path: r.Path, Branch: branch, CheckedOut: current})
 		}
 	}
 	return out, nil
