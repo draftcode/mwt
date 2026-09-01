@@ -123,12 +123,34 @@ func judge(all []*workspace.Workspace) []wsVerdict {
 	return out
 }
 
+// goneVerdict judges a repo whose worktree directory is no longer there — removed
+// by hand, or by a prune that failed on a later repo of the same workspace. The
+// files are already gone, so the only thing a removal can still take is the branch
+// the worktree left behind in the source repo.
+func goneVerdict(r workspace.Repo, recorded string) repoVerdict {
+	v := repoVerdict{repo: r, detail: "worktree directory is gone"}
+	if !git.BranchExists(r.Source, recorded) {
+		v.merged, v.detail = true, "worktree and branch already gone"
+		return v
+	}
+	n, err := git.BranchUnpushedCommits(r.Source, recorded)
+	if err != nil {
+		v.detail += fmt.Sprintf(", and %s cannot be inspected (%v)", recorded, err)
+		return v
+	}
+	if n > 0 {
+		v.detail += fmt.Sprintf(", and %s holds %d unpushed commit(s)", recorded, n)
+		return v
+	}
+	v.merged, v.detail = true, fmt.Sprintf("worktree directory is gone, %s fully pushed", recorded)
+	return v
+}
+
 func judgeRepo(r workspace.Repo, recorded string) repoVerdict {
 	v := repoVerdict{repo: r}
 
 	if _, err := os.Stat(r.Path); err != nil {
-		v.detail = "worktree directory is gone"
-		return v
+		return goneVerdict(r, recorded)
 	}
 	// The worktree decides which branch's PR to read, not the name recorded at
 	// creation: a branch switched or renamed inside the worktree leaves that name

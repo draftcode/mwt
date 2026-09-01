@@ -94,9 +94,18 @@ func removeWorkspace(ws *workspace.Workspace, opts removalOpts) error {
 		if s, err := git.Describe(r.Path); err == nil && s.OnBranch() {
 			branch = s.Branch
 		}
-		if err := git.RemoveWorktree(r.Source, r.Path, opts.force); err != nil {
-			errs = append(errs, fmt.Errorf("%s: %w", r.Name, err))
-			continue
+		// git worktree remove needs the directory to be there. One already gone leaves
+		// only the source repo's registration of it, which worktree prune clears.
+		removeErr := git.RemoveWorktree(r.Source, r.Path, opts.force)
+		if removeErr != nil {
+			if _, statErr := os.Stat(r.Path); statErr == nil {
+				errs = append(errs, fmt.Errorf("%s: %w", r.Name, removeErr))
+				continue
+			}
+			if err := git.PruneWorktrees(r.Source); err != nil {
+				errs = append(errs, fmt.Errorf("%s: %w", r.Name, err))
+				continue
+			}
 		}
 		if opts.deleteBranch {
 			flag := "-d"

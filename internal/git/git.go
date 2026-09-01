@@ -281,6 +281,23 @@ func UnpushedCommitList(dir string, known ...string) ([]string, error) {
 	return strings.Split(out, "\n"), nil
 }
 
+// BranchUnpushedCommits counts commits on branch that no remote-tracking ref
+// holds. It answers for a branch what UnpushedCommits answers for a checked-out
+// worktree, which is all that is left to judge once the worktree is gone.
+func BranchUnpushedCommits(dir, branch string) (int, error) {
+	out, err := Run(dir, "rev-list", "--count", branch, "--not", "--remotes")
+	if err != nil {
+		return 0, err
+	}
+	return strconv.Atoi(out)
+}
+
+// PruneWorktrees drops the repo's records of worktrees whose directory is gone.
+func PruneWorktrees(dir string) error {
+	_, err := Run(dir, "worktree", "prune")
+	return err
+}
+
 // EquivalentCommits returns the commits between upstream and head whose patch
 // upstream already holds under a different hash. git cherry does the patch-id
 // comparison and marks such a commit "-".
