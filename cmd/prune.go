@@ -164,15 +164,14 @@ func judgeRepo(r workspace.Repo, recorded string) repoVerdict {
 	}
 
 	// The PR is merged, so commits on the branch are accounted for even when the
-	// merge was a squash. Only work that never reached the PR still matters:
-	// uncommitted files, and commits pushed nowhere. Counting the PR head as
-	// reachable is what keeps a squash-merged branch prunable — its commits live
-	// on under no remote ref once the remote branch is deleted.
+	// merge was a squash or the branch was rewritten before it. Only work that never
+	// reached the PR still matters: uncommitted files, and commits whose patch is
+	// nowhere upstream.
 	if s.Dirty > 0 {
 		v.detail = fmt.Sprintf("PR #%d merged%s, but %d uncommitted file(s)", pr.Number, suffix, s.Dirty)
 		return v
 	}
-	unpushed, err := git.UnpushedCommits(r.Path, pr.HeadOid)
+	unpushed, err := git.UnmergedCommits(r.Path, pr.HeadOid)
 	if err != nil {
 		v.detail = fmt.Sprintf("PR #%d merged%s, but cannot inspect (%v)", pr.Number, suffix, err)
 		return v
@@ -183,7 +182,7 @@ func judgeRepo(r workspace.Repo, recorded string) repoVerdict {
 	// ask again, rather than keeping a merged workspace forever.
 	if unpushed > 0 && !git.HasCommit(r.Path, pr.HeadOid) {
 		if err := git.FetchPRHead(r.Path, pr.Number); err == nil {
-			unpushed, err = git.UnpushedCommits(r.Path, pr.HeadOid)
+			unpushed, err = git.UnmergedCommits(r.Path, pr.HeadOid)
 			if err != nil {
 				v.detail = fmt.Sprintf("PR #%d merged%s, but cannot inspect (%v)", pr.Number, suffix, err)
 				return v
@@ -191,7 +190,7 @@ func judgeRepo(r workspace.Repo, recorded string) repoVerdict {
 		}
 	}
 	if unpushed > 0 {
-		v.detail = fmt.Sprintf("PR #%d merged%s, but %d unpushed commit(s)", pr.Number, suffix, unpushed)
+		v.detail = fmt.Sprintf("PR #%d merged%s, but %d commit(s) diverge from the merged tip", pr.Number, suffix, unpushed)
 		return v
 	}
 	v.merged, v.detail = true, fmt.Sprintf("PR #%d merged%s", pr.Number, suffix)

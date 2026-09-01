@@ -271,3 +271,64 @@ func TestRemoveWorktreeWithSubmoduleKeepsDirtyWork(t *testing.T) {
 		t.Errorf("worktree directory still present: %v", err)
 	}
 }
+
+func writeCommit(t *testing.T, dir, name, content, msg string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustRun(t, dir, "add", name)
+	mustRun(t, dir, "commit", "-m", msg)
+}
+
+func unmerged(t *testing.T, dir, prHead string) int {
+	t.Helper()
+	n, err := UnmergedCommits(dir, prHead)
+	if err != nil {
+		t.Fatalf("UnmergedCommits: %v", err)
+	}
+	return n
+}
+
+// A branch rebased between its last push and the merge keeps a copy of every
+// merged commit under a fresh hash. The PR head is then neither an ancestor of
+// HEAD nor on any remote ref, so reachability reads the copy as work that never
+// landed, and no later push can ever settle it.
+func TestUnmergedCommitsIgnoresRewrittenCopy(t *testing.T) {
+	dir := newRepo(t)
+	topicBranch(t, dir)
+	writeCommit(t, dir, "feature.txt", "feature\n", "work")
+	prHead := mustRun(t, dir, "rev-parse", "HEAD")
+
+	mustRun(t, dir, "checkout", "main")
+	writeCommit(t, dir, "trunk.txt", "trunk\n", "someone else's work")
+	mustRun(t, dir, "push", "origin", "main")
+	mustRun(t, dir, "checkout", "topic")
+	mustRun(t, dir, "rebase", "origin/main")
+
+	if head := mustRun(t, dir, "rev-parse", "HEAD"); head == prHead {
+		t.Fatal("the rebase left the hash unchanged, the test proves nothing")
+	}
+	if got := unpushed(t, dir, prHead); got != 1 {
+		t.Fatalf("UnpushedCommits: got %d, want 1", got)
+	}
+	if got := unmerged(t, dir, prHead); got != 0 {
+		t.Errorf("UnmergedCommits: got %d, want 0", got)
+	}
+}
+
+// A commit whose content differs from the merged tip is not a copy of it, even
+// under the same subject: the local version is missing whatever the push added.
+func TestUnmergedCommitsKeepsDivergedCommit(t *testing.T) {
+	dir := newRepo(t)
+	topicBranch(t, dir)
+	writeCommit(t, dir, "feature.txt", "feature\nreviewed\n", "work")
+	prHead := mustRun(t, dir, "rev-parse", "HEAD")
+
+	mustRun(t, dir, "reset", "--hard", "HEAD~1")
+	writeCommit(t, dir, "feature.txt", "feature\n", "work")
+
+	if got := unmerged(t, dir, prHead); got != 1 {
+		t.Errorf("got %d, want 1", got)
+	}
+}

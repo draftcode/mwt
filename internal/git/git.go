@@ -253,7 +253,13 @@ func FetchPRHead(dir string, number int) error {
 // this branch" — pushing the branch to origin/<branch> never brings it back to
 // zero, and every branch with a commit reads as unpushed.
 func UnpushedCommits(dir string, known ...string) (int, error) {
-	args := []string{"rev-list", "--count", "HEAD"}
+	commits, err := UnpushedCommitList(dir, known...)
+	return len(commits), err
+}
+
+// UnpushedCommitList is UnpushedCommits with the commits themselves, newest first.
+func UnpushedCommitList(dir string, known ...string) ([]string, error) {
+	args := []string{"rev-list", "HEAD"}
 	for _, ref := range known {
 		// An unknown ref would abort rev-list, and a PR head is routinely absent
 		// locally (never fetched, or dropped when the remote branch was deleted).
@@ -267,9 +273,59 @@ func UnpushedCommits(dir string, known ...string) (int, error) {
 	args = append(args, "--not", "--remotes")
 	out, err := Run(dir, args...)
 	if err != nil {
+		return nil, err
+	}
+	if out == "" {
+		return nil, nil
+	}
+	return strings.Split(out, "\n"), nil
+}
+
+// EquivalentCommits returns the commits between upstream and head whose patch
+// upstream already holds under a different hash. git cherry does the patch-id
+// comparison and marks such a commit "-".
+func EquivalentCommits(dir, upstream, head string) (map[string]bool, error) {
+	out, err := Run(dir, "cherry", upstream, head)
+	if err != nil {
+		return nil, err
+	}
+	dup := make(map[string]bool)
+	for _, line := range strings.Split(out, "\n") {
+		if mark, sha, ok := strings.Cut(line, " "); ok && mark == "-" {
+			dup[sha] = true
+		}
+	}
+	return dup, nil
+}
+
+// UnmergedCommits counts the commits on HEAD that a merged pull request does not
+// account for: those on no remote ref whose patch is absent from prHead's history
+// too.
+//
+// Matching by patch and not by hash is what makes the count survive a rewrite. A
+// branch amended or rebased between its last push and the merge keeps a copy of
+// every merged commit under a fresh hash, and by reachability alone each copy
+// reads as work that never landed — permanently, since no later push can make a
+// commit that no longer exists upstream reachable.
+func UnmergedCommits(dir, prHead string) (int, error) {
+	local, err := UnpushedCommitList(dir, prHead)
+	if err != nil {
 		return 0, err
 	}
-	return strconv.Atoi(out)
+	if len(local) == 0 || !HasCommit(dir, prHead) {
+		return len(local), nil
+	}
+	dup, err := EquivalentCommits(dir, prHead, "HEAD")
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, c := range local {
+		if !dup[c] {
+			n++
+		}
+	}
+	return n, nil
 }
 
 // HasUnpushedWork reports whether the worktree has local changes that would be lost.
