@@ -167,8 +167,9 @@ func judgeRepo(r workspace.Repo, recorded string) repoVerdict {
 	// merge was a squash or the branch was rewritten before it. Only work that never
 	// reached the PR still matters: uncommitted files, and commits whose patch is
 	// nowhere upstream.
-	if s.Dirty > 0 {
-		v.detail = fmt.Sprintf("PR #%d merged%s, but %d uncommitted file(s)", pr.Number, suffix, s.Dirty)
+	unsaved, stale := git.UnsavedFiles(r.Path, s.Dirty)
+	if unsaved > 0 {
+		v.detail = fmt.Sprintf("PR #%d merged%s, but %d uncommitted file(s)", pr.Number, suffix, unsaved)
 		return v
 	}
 	unpushed, err := git.UnmergedCommits(r.Path, pr.HeadOid)
@@ -194,6 +195,9 @@ func judgeRepo(r workspace.Repo, recorded string) repoVerdict {
 		return v
 	}
 	v.merged, v.detail = true, fmt.Sprintf("PR #%d merged%s", pr.Number, suffix)
+	if stale > 0 {
+		v.detail += fmt.Sprintf(" (%d stale submodule pointer(s))", stale)
+	}
 	return v
 }
 
