@@ -123,12 +123,34 @@ func judge(all []*workspace.Workspace) []wsVerdict {
 	return out
 }
 
+// goneVerdict judges a repo whose worktree directory is no longer there — removed
+// by hand, or by a prune that failed on a later repo of the same workspace. The
+// files are already gone, so the only thing a removal can still take is the branch
+// the worktree left behind in the source repo.
+func goneVerdict(r workspace.Repo, recorded string) repoVerdict {
+	v := repoVerdict{repo: r, detail: "worktree directory is gone"}
+	if !git.BranchExists(r.Source, recorded) {
+		v.merged, v.detail = true, "worktree and branch already gone"
+		return v
+	}
+	n, err := git.BranchUnpushedCommits(r.Source, recorded)
+	if err != nil {
+		v.detail += fmt.Sprintf(", and %s cannot be inspected (%v)", recorded, err)
+		return v
+	}
+	if n > 0 {
+		v.detail += fmt.Sprintf(", and %s holds %d unpushed commit(s)", recorded, n)
+		return v
+	}
+	v.merged, v.detail = true, fmt.Sprintf("worktree directory is gone, %s fully pushed", recorded)
+	return v
+}
+
 func judgeRepo(r workspace.Repo, recorded string) repoVerdict {
 	v := repoVerdict{repo: r}
 
 	if _, err := os.Stat(r.Path); err != nil {
-		v.detail = "worktree directory is gone"
-		return v
+		return goneVerdict(r, recorded)
 	}
 	// The worktree decides which branch's PR to read, not the name recorded at
 	// creation: a branch switched or renamed inside the worktree leaves that name
@@ -164,15 +186,15 @@ func judgeRepo(r workspace.Repo, recorded string) repoVerdict {
 	}
 
 	// The PR is merged, so commits on the branch are accounted for even when the
-	// merge was a squash. Only work that never reached the PR still matters:
-	// uncommitted files, and commits pushed nowhere. Counting the PR head as
-	// reachable is what keeps a squash-merged branch prunable — its commits live
-	// on under no remote ref once the remote branch is deleted.
-	if s.Dirty > 0 {
-		v.detail = fmt.Sprintf("PR #%d merged%s, but %d uncommitted file(s)", pr.Number, suffix, s.Dirty)
+	// merge was a squash or the branch was rewritten before it. Only work that never
+	// reached the PR still matters: uncommitted files, and commits whose patch is
+	// nowhere upstream.
+	unsaved, stale := git.UnsavedFiles(r.Path, s.Dirty)
+	if unsaved > 0 {
+		v.detail = fmt.Sprintf("PR #%d merged%s, but %d uncommitted file(s)", pr.Number, suffix, unsaved)
 		return v
 	}
-	unpushed, err := git.UnpushedCommits(r.Path, pr.HeadOid)
+	unpushed, err := git.UnmergedCommits(r.Path, pr.HeadOid)
 	if err != nil {
 		v.detail = fmt.Sprintf("PR #%d merged%s, but cannot inspect (%v)", pr.Number, suffix, err)
 		return v
@@ -183,7 +205,7 @@ func judgeRepo(r workspace.Repo, recorded string) repoVerdict {
 	// ask again, rather than keeping a merged workspace forever.
 	if unpushed > 0 && !git.HasCommit(r.Path, pr.HeadOid) {
 		if err := git.FetchPRHead(r.Path, pr.Number); err == nil {
-			unpushed, err = git.UnpushedCommits(r.Path, pr.HeadOid)
+			unpushed, err = git.UnmergedCommits(r.Path, pr.HeadOid)
 			if err != nil {
 				v.detail = fmt.Sprintf("PR #%d merged%s, but cannot inspect (%v)", pr.Number, suffix, err)
 				return v
@@ -191,10 +213,13 @@ func judgeRepo(r workspace.Repo, recorded string) repoVerdict {
 		}
 	}
 	if unpushed > 0 {
-		v.detail = fmt.Sprintf("PR #%d merged%s, but %d unpushed commit(s)", pr.Number, suffix, unpushed)
+		v.detail = fmt.Sprintf("PR #%d merged%s, but %d commit(s) diverge from the merged tip", pr.Number, suffix, unpushed)
 		return v
 	}
 	v.merged, v.detail = true, fmt.Sprintf("PR #%d merged%s", pr.Number, suffix)
+	if stale > 0 {
+		v.detail += fmt.Sprintf(" (%d stale submodule pointer(s))", stale)
+	}
 	return v
 }
 

@@ -271,3 +271,245 @@ func TestRemoveWorktreeWithSubmoduleKeepsDirtyWork(t *testing.T) {
 		t.Errorf("worktree directory still present: %v", err)
 	}
 }
+
+func writeCommit(t *testing.T, dir, name, content, msg string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustRun(t, dir, "add", name)
+	mustRun(t, dir, "commit", "-m", msg)
+}
+
+func unmerged(t *testing.T, dir, prHead string) int {
+	t.Helper()
+	n, err := UnmergedCommits(dir, prHead)
+	if err != nil {
+		t.Fatalf("UnmergedCommits: %v", err)
+	}
+	return n
+}
+
+// A branch rebased between its last push and the merge keeps a copy of every
+// merged commit under a fresh hash. The PR head is then neither an ancestor of
+// HEAD nor on any remote ref, so reachability reads the copy as work that never
+// landed, and no later push can ever settle it.
+func TestUnmergedCommitsIgnoresRewrittenCopy(t *testing.T) {
+	dir := newRepo(t)
+	topicBranch(t, dir)
+	writeCommit(t, dir, "feature.txt", "feature\n", "work")
+	prHead := mustRun(t, dir, "rev-parse", "HEAD")
+
+	mustRun(t, dir, "checkout", "main")
+	writeCommit(t, dir, "trunk.txt", "trunk\n", "someone else's work")
+	mustRun(t, dir, "push", "origin", "main")
+	mustRun(t, dir, "checkout", "topic")
+	mustRun(t, dir, "rebase", "origin/main")
+
+	if head := mustRun(t, dir, "rev-parse", "HEAD"); head == prHead {
+		t.Fatal("the rebase left the hash unchanged, the test proves nothing")
+	}
+	if got := unpushed(t, dir, prHead); got != 1 {
+		t.Fatalf("UnpushedCommits: got %d, want 1", got)
+	}
+	if got := unmerged(t, dir, prHead); got != 0 {
+		t.Errorf("UnmergedCommits: got %d, want 0", got)
+	}
+}
+
+// A commit whose content differs from the merged tip is not a copy of it, even
+// under the same subject: the local version is missing whatever the push added.
+func TestUnmergedCommitsKeepsDivergedCommit(t *testing.T) {
+	dir := newRepo(t)
+	topicBranch(t, dir)
+	writeCommit(t, dir, "feature.txt", "feature\nreviewed\n", "work")
+	prHead := mustRun(t, dir, "rev-parse", "HEAD")
+
+	mustRun(t, dir, "reset", "--hard", "HEAD~1")
+	writeCommit(t, dir, "feature.txt", "feature\n", "work")
+
+	if got := unmerged(t, dir, prHead); got != 1 {
+		t.Errorf("got %d, want 1", got)
+	}
+}
+
+// submoduleAt gives the submodule an identity and returns its path.
+func submoduleAt(t *testing.T, dir string) string {
+	t.Helper()
+	sub := filepath.Join(dir, "submodules/dep")
+	mustRun(t, sub, "config", "user.email", "test@test.invalid")
+	mustRun(t, sub, "config", "user.name", "test")
+	return sub
+}
+
+// assertDirty guards the negative submodule cases: a clean worktree would pass
+// them without the filter ever being asked anything.
+func assertDirty(t *testing.T, dir string) {
+	t.Helper()
+	s, err := Describe(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Dirty == 0 {
+		t.Fatal("worktree is clean, the test proves nothing")
+	}
+}
+
+// The gitlink a merged superproject commit records outlives its own commit once
+// the submodule's branch is squash-merged and deleted: nothing can resolve it,
+// and the checkout can only sit elsewhere.
+func TestStaleSubmodulePointers(t *testing.T) {
+	dir := newRepo(t)
+	addSubmodule(t, dir)
+	sub := submoduleAt(t, dir)
+
+	base := mustRun(t, sub, "rev-parse", "HEAD")
+	writeCommit(t, sub, "dep.txt", "dep\n", "submodule work")
+	doomed := mustRun(t, sub, "rev-parse", "HEAD")
+	mustRun(t, dir, "add", "submodules/dep")
+	mustRun(t, dir, "commit", "-m", "bump submodule")
+
+	mustRun(t, sub, "reset", "--hard", base)
+	mustRun(t, sub, "reflog", "expire", "--expire=now", "--all")
+	mustRun(t, sub, "gc", "--prune=now", "--quiet")
+	if HasCommit(sub, doomed) {
+		t.Fatal("the recorded commit survived in the submodule, the test proves nothing")
+	}
+
+	s, err := Describe(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Dirty != 1 {
+		t.Fatalf("Describe reports %d dirty file(s), want 1", s.Dirty)
+	}
+	stale, err := StaleSubmodulePointers(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stale) != 1 || stale[0] != "submodules/dep" {
+		t.Errorf("got %v, want [submodules/dep]", stale)
+	}
+}
+
+// A gitlink that still resolves is an ordinary bump: someone can commit it, so it
+// is work.
+func TestStaleSubmodulePointersKeepsResolvableBump(t *testing.T) {
+	dir := newRepo(t)
+	addSubmodule(t, dir)
+	sub := submoduleAt(t, dir)
+	writeCommit(t, sub, "dep.txt", "dep\n", "submodule work")
+
+	assertDirty(t, dir)
+	stale, err := StaleSubmodulePointers(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stale) != 0 {
+		t.Errorf("got %v, want none", stale)
+	}
+}
+
+// Content changed inside the submodule is work no matter what the gitlink does.
+func TestStaleSubmodulePointersKeepsSubmoduleEdits(t *testing.T) {
+	dir := newRepo(t)
+	addSubmodule(t, dir)
+	sub := submoduleAt(t, dir)
+	write(t, sub, "untracked.txt")
+
+	assertDirty(t, dir)
+	stale, err := StaleSubmodulePointers(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stale) != 0 {
+		t.Errorf("got %v, want none", stale)
+	}
+}
+
+// A submodule holding commits of its own that no remote has is work, and the
+// worktree's own gitdir is the only place it lives — an unresolvable gitlink must
+// not wave that away.
+func TestStaleSubmodulePointersKeepsUnpushedSubmoduleWork(t *testing.T) {
+	dir := newRepo(t)
+	addSubmodule(t, dir)
+	sub := submoduleAt(t, dir)
+
+	base := mustRun(t, sub, "rev-parse", "HEAD")
+	writeCommit(t, sub, "dep.txt", "dep\n", "submodule work")
+	doomed := mustRun(t, sub, "rev-parse", "HEAD")
+	mustRun(t, dir, "add", "submodules/dep")
+	mustRun(t, dir, "commit", "-m", "bump submodule")
+
+	mustRun(t, sub, "reset", "--hard", base)
+	mustRun(t, sub, "reflog", "expire", "--expire=now", "--all")
+	mustRun(t, sub, "gc", "--prune=now", "--quiet")
+	if HasCommit(sub, doomed) {
+		t.Fatal("the recorded commit survived in the submodule, the test proves nothing")
+	}
+	writeCommit(t, sub, "later.txt", "later\n", "work nobody pushed")
+
+	assertDirty(t, dir)
+	stale, err := StaleSubmodulePointers(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stale) != 0 {
+		t.Errorf("got %v, want none", stale)
+	}
+}
+
+// staleGitlinkInWorktree leaves the worktree's submodule pointing at a commit the
+// submodule no longer has, which is what a merged-and-deleted submodule branch
+// does to a superproject commit that recorded its tip.
+func staleGitlinkInWorktree(t *testing.T, wt string) {
+	t.Helper()
+	sub := submoduleAt(t, wt)
+	base := mustRun(t, sub, "rev-parse", "HEAD")
+	writeCommit(t, sub, "dep.txt", "dep\n", "submodule work")
+	doomed := mustRun(t, sub, "rev-parse", "HEAD")
+	mustRun(t, wt, "add", "submodules/dep")
+	mustRun(t, wt, "commit", "-m", "bump submodule")
+
+	mustRun(t, sub, "reset", "--hard", base)
+	mustRun(t, sub, "reflog", "expire", "--expire=now", "--all")
+	mustRun(t, sub, "gc", "--prune=now", "--quiet")
+	if HasCommit(sub, doomed) {
+		t.Fatal("the recorded commit survived in the submodule, the test proves nothing")
+	}
+}
+
+// An unresolvable gitlink must not stand in for uncommitted work: git's own
+// submodule refusal sends removal through the stand-in dirty check, and counting
+// the gitlink there strands a worktree nobody can clean up without --force.
+func TestRemoveWorktreeWithStaleSubmodulePointer(t *testing.T) {
+	dir := newRepo(t)
+	addSubmodule(t, dir)
+	wt := worktreeWithSubmodule(t, dir, "topic")
+	staleGitlinkInWorktree(t, wt)
+	assertDirty(t, wt)
+
+	if err := RemoveWorktree(dir, wt, false); err != nil {
+		t.Fatalf("RemoveWorktree: %v", err)
+	}
+	if _, err := os.Stat(wt); !os.IsNotExist(err) {
+		t.Errorf("worktree directory still present: %v", err)
+	}
+}
+
+// mwt rm reads the same dirt, and must not refuse over it either.
+func TestHasUnpushedWorkIgnoresStaleSubmodulePointer(t *testing.T) {
+	dir := newRepo(t)
+	addSubmodule(t, dir)
+	wt := worktreeWithSubmodule(t, dir, "topic")
+	staleGitlinkInWorktree(t, wt)
+	mustRun(t, wt, "push", "-u", "origin", "topic")
+
+	has, reason, err := HasUnpushedWork(wt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if has {
+		t.Errorf("HasUnpushedWork = true (%s), want false", reason)
+	}
+}

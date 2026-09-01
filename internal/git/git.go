@@ -169,8 +169,8 @@ func RemoveWorktree(repoDir, path string, force bool) error {
 	if describeErr != nil {
 		return fmt.Errorf("cannot inspect %s: %w", path, describeErr)
 	}
-	if s.Dirty > 0 {
-		return fmt.Errorf("%s holds %d uncommitted file(s); re-run with --force to discard", path, s.Dirty)
+	if unsaved, _ := UnsavedFiles(path, s.Dirty); unsaved > 0 {
+		return fmt.Errorf("%s holds %d uncommitted file(s); re-run with --force to discard", path, unsaved)
 	}
 	_, err = Run(repoDir, removeArgs(path, true)...)
 	return err
@@ -253,7 +253,13 @@ func FetchPRHead(dir string, number int) error {
 // this branch" — pushing the branch to origin/<branch> never brings it back to
 // zero, and every branch with a commit reads as unpushed.
 func UnpushedCommits(dir string, known ...string) (int, error) {
-	args := []string{"rev-list", "--count", "HEAD"}
+	commits, err := UnpushedCommitList(dir, known...)
+	return len(commits), err
+}
+
+// UnpushedCommitList is UnpushedCommits with the commits themselves, newest first.
+func UnpushedCommitList(dir string, known ...string) ([]string, error) {
+	args := []string{"rev-list", "HEAD"}
 	for _, ref := range known {
 		// An unknown ref would abort rev-list, and a PR head is routinely absent
 		// locally (never fetched, or dropped when the remote branch was deleted).
@@ -267,9 +273,129 @@ func UnpushedCommits(dir string, known ...string) (int, error) {
 	args = append(args, "--not", "--remotes")
 	out, err := Run(dir, args...)
 	if err != nil {
+		return nil, err
+	}
+	if out == "" {
+		return nil, nil
+	}
+	return strings.Split(out, "\n"), nil
+}
+
+// BranchUnpushedCommits counts commits on branch that no remote-tracking ref
+// holds. It answers for a branch what UnpushedCommits answers for a checked-out
+// worktree, which is all that is left to judge once the worktree is gone.
+func BranchUnpushedCommits(dir, branch string) (int, error) {
+	out, err := Run(dir, "rev-list", "--count", branch, "--not", "--remotes")
+	if err != nil {
 		return 0, err
 	}
 	return strconv.Atoi(out)
+}
+
+// PruneWorktrees drops the repo's records of worktrees whose directory is gone.
+func PruneWorktrees(dir string) error {
+	_, err := Run(dir, "worktree", "prune")
+	return err
+}
+
+// EquivalentCommits returns the commits between upstream and head whose patch
+// upstream already holds under a different hash. git cherry does the patch-id
+// comparison and marks such a commit "-".
+func EquivalentCommits(dir, upstream, head string) (map[string]bool, error) {
+	out, err := Run(dir, "cherry", upstream, head)
+	if err != nil {
+		return nil, err
+	}
+	dup := make(map[string]bool)
+	for _, line := range strings.Split(out, "\n") {
+		if mark, sha, ok := strings.Cut(line, " "); ok && mark == "-" {
+			dup[sha] = true
+		}
+	}
+	return dup, nil
+}
+
+// UnmergedCommits counts the commits on HEAD that a merged pull request does not
+// account for: those on no remote ref whose patch is absent from prHead's history
+// too.
+//
+// Matching by patch and not by hash is what makes the count survive a rewrite. A
+// branch amended or rebased between its last push and the merge keeps a copy of
+// every merged commit under a fresh hash, and by reachability alone each copy
+// reads as work that never landed — permanently, since no later push can make a
+// commit that no longer exists upstream reachable.
+func UnmergedCommits(dir, prHead string) (int, error) {
+	local, err := UnpushedCommitList(dir, prHead)
+	if err != nil {
+		return 0, err
+	}
+	if len(local) == 0 || !HasCommit(dir, prHead) {
+		return len(local), nil
+	}
+	dup, err := EquivalentCommits(dir, prHead, "HEAD")
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, c := range local {
+		if !dup[c] {
+			n++
+		}
+	}
+	return n, nil
+}
+
+// UnsavedFiles splits a dirty-file count into the files that hold work and the
+// submodule gitlinks nothing can resolve. Every caller that asks "would removing
+// this worktree lose something?" wants the first number, and the second only to
+// say why the count moved.
+func UnsavedFiles(dir string, dirty int) (unsaved, stale int) {
+	if dirty == 0 {
+		return 0, 0
+	}
+	paths, err := StaleSubmodulePointers(dir)
+	if err != nil {
+		return dirty, 0
+	}
+	return dirty - len(paths), len(paths)
+}
+
+// StaleSubmodulePointers lists the dirty paths that are submodule gitlinks whose
+// recorded commit is missing from the submodule.
+//
+// A squash merge deletes the submodule branch the superproject commit pointed at,
+// which takes the recorded commit with it: nothing can restore that gitlink and
+// the checkout can only sit on some other commit. The dirt is unresolvable rather
+// than unsaved work. A submodule holding edited content, untracked files, or
+// commits of its own that no remote has is left out — that is work, and a missing
+// gitlink cannot tell a deleted branch from one this clone never fetched.
+func StaleSubmodulePointers(dir string) ([]string, error) {
+	out, err := Run(dir, "status", "--porcelain=v2")
+	if err != nil {
+		return nil, err
+	}
+	var stale []string
+	for _, line := range strings.Split(out, "\n") {
+		// "1 <XY> <sub> <mH> <mI> <mW> <hH> <hI> <path>", where sub reads S<c><m><u>
+		// for a submodule and hH is the commit HEAD records for it. Renamed entries
+		// ("2 ") carry a tab-separated pair of paths and never describe a gitlink bump.
+		if !strings.HasPrefix(line, "1 ") {
+			continue
+		}
+		fields := strings.SplitN(line, " ", 9)
+		if len(fields) < 9 || fields[2] != "SC.." {
+			continue
+		}
+		sub := filepath.Join(dir, fields[8])
+		if !IsRepo(sub) || HasCommit(sub, fields[6]) {
+			continue
+		}
+		if n, err := UnpushedCommits(sub); err != nil || n > 0 {
+			continue
+		}
+		stale = append(stale, fields[8])
+	}
+	return stale, nil
 }
 
 // HasUnpushedWork reports whether the worktree has local changes that would be lost.
@@ -279,8 +405,8 @@ func HasUnpushedWork(dir string) (bool, string, error) {
 		return false, "", err
 	}
 	var reasons []string
-	if s.Dirty > 0 {
-		reasons = append(reasons, fmt.Sprintf("%d uncommitted file(s)", s.Dirty))
+	if unsaved, _ := UnsavedFiles(dir, s.Dirty); unsaved > 0 {
+		reasons = append(reasons, fmt.Sprintf("%d uncommitted file(s)", unsaved))
 	}
 	n, err := UnpushedCommits(dir)
 	if err != nil {
