@@ -107,7 +107,9 @@ func removeWorkspace(ws *workspace.Workspace, opts removalOpts) error {
 				continue
 			}
 		}
-		if opts.deleteBranch {
+		// A branch that is already gone is not an error: the root below is deleted only
+		// when every repo succeeded.
+		if opts.deleteBranch && git.BranchExists(r.Source, branch) {
 			flag := "-d"
 			if opts.force || opts.forceDeleteBranch {
 				flag = "-D"
