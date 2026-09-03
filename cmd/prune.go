@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"text/tabwriter"
 
@@ -65,6 +66,18 @@ func (v wsVerdict) prunable() bool {
 	return true
 }
 
+// finished names the repos whose own work has landed, which is only interesting
+// for a workspace that stays: when every repo is finished the workspace goes whole.
+func (v wsVerdict) finished() []repoVerdict {
+	var out []repoVerdict
+	for _, r := range v.repos {
+		if r.merged {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
 // staleBranches counts the stack branches the workspace would give up.
 func (v wsVerdict) staleBranches() int {
 	n := 0
@@ -108,24 +121,34 @@ func pruneCmd() *cobra.Command {
 					doomed = append(doomed, v)
 					continue
 				}
-				if v.staleBranches() > 0 {
+				if v.staleBranches() > 0 || len(v.finished()) > 0 {
 					kept = append(kept, v)
 				}
 			}
 			reportPrune(cmd, verdicts)
-			if len(doomed) == 0 && len(kept) == 0 {
+
+			worktrees, branches := 0, 0
+			for _, v := range doomed {
+				branches += v.staleBranches()
+			}
+			for _, v := range kept {
+				worktrees += len(v.finished())
+				branches += v.staleBranches()
+			}
+			if len(doomed) == 0 && worktrees == 0 && branches == 0 {
 				return nil
 			}
 			if opts.dryRun {
 				return nil
 			}
-			if !opts.yes && !confirm(cmd, prunePrompt(doomed, kept)) {
+			if !opts.yes && !confirm(cmd, prunePrompt(len(doomed), worktrees, branches)) {
 				return errors.New("aborted")
 			}
 
+			removal := removalOpts{deleteBranch: !opts.keepBranch, forceDeleteBranch: true}
 			var errs []error
 			for _, v := range doomed {
-				if err := removeWorkspace(v.ws, removalOpts{deleteBranch: !opts.keepBranch, forceDeleteBranch: true}); err != nil {
+				if err := removeWorkspace(v.ws, removal); err != nil {
 					errs = append(errs, fmt.Errorf("%s: %w", v.ws.Name, err))
 					continue
 				}
@@ -134,6 +157,13 @@ func pruneCmd() *cobra.Command {
 			}
 			for _, v := range kept {
 				errs = append(errs, deleteStale(cmd, v)...)
+				for _, r := range v.finished() {
+					if err := removeRepo(v.ws, r.repo, removal); err != nil {
+						errs = append(errs, fmt.Errorf("%s: %w", v.ws.Name, err))
+						continue
+					}
+					fmt.Fprintf(cmd.ErrOrStderr(), "removed %s\n", r.repo.Path)
+				}
 			}
 			return errors.Join(errs...)
 		},
@@ -350,21 +380,18 @@ func deleteStale(cmd *cobra.Command, v wsVerdict) []error {
 	return errs
 }
 
-func prunePrompt(doomed, kept []wsVerdict) string {
-	branches := 0
-	for _, v := range doomed {
-		branches += v.staleBranches()
+func prunePrompt(workspaces, worktrees, branches int) string {
+	var parts []string
+	if workspaces > 0 {
+		parts = append(parts, fmt.Sprintf("remove %d workspace(s)", workspaces))
 	}
-	for _, v := range kept {
-		branches += v.staleBranches()
+	if worktrees > 0 {
+		parts = append(parts, fmt.Sprintf("remove %d finished worktree(s)", worktrees))
 	}
-	switch {
-	case len(doomed) == 0:
-		return fmt.Sprintf("delete %d merged branch(es)?", branches)
-	case branches == 0:
-		return fmt.Sprintf("remove %d workspace(s)?", len(doomed))
+	if branches > 0 {
+		parts = append(parts, fmt.Sprintf("delete %d merged branch(es)", branches))
 	}
-	return fmt.Sprintf("remove %d workspace(s) and delete %d merged branch(es)?", len(doomed), branches)
+	return strings.Join(parts, ", ") + "?"
 }
 
 func reportPrune(cmd *cobra.Command, verdicts []wsVerdict) {
@@ -391,6 +418,7 @@ func reportPrune(cmd *cobra.Command, verdicts []wsVerdict) {
 	}
 	w.Flush()
 
+	shown = reportFinished(cmd, kept, shown) || shown
 	shown = reportStaleBranches(cmd, kept, shown) || shown
 
 	if len(kept) == 0 {
@@ -406,6 +434,10 @@ func reportPrune(cmd *cobra.Command, verdicts []wsVerdict) {
 			continue
 		}
 		for _, r := range v.repos {
+			// A finished repo is named in the removal section above, not here.
+			if r.merged {
+				continue
+			}
 			fmt.Fprintf(cmd.ErrOrStderr(), "  %s (%s): %s\n", v.ws.Name, r.repo.Name, r.detail)
 			for _, b := range r.stack {
 				if !b.merged {
@@ -414,6 +446,25 @@ func reportPrune(cmd *cobra.Command, verdicts []wsVerdict) {
 			}
 		}
 	}
+}
+
+// reportFinished lists the repos of a workspace that stays whose own work has
+// landed, so its worktree goes while the workspace waits on its siblings.
+func reportFinished(cmd *cobra.Command, kept []wsVerdict, afterTable bool) bool {
+	shown := false
+	for _, v := range kept {
+		for _, r := range v.finished() {
+			if !shown {
+				if afterTable {
+					fmt.Fprintln(cmd.ErrOrStderr())
+				}
+				fmt.Fprintln(cmd.ErrOrStderr(), "finished worktrees to remove:")
+				shown = true
+			}
+			fmt.Fprintf(cmd.ErrOrStderr(), "  %s (%s): %s\n", v.ws.Name, r.repo.Name, r.detail)
+		}
+	}
+	return shown
 }
 
 // reportStaleBranches lists the merged branches of workspaces that stay, which the

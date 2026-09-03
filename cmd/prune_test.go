@@ -114,23 +114,20 @@ func TestDeleteStaleDeletesOnlyTheMergedBranch(t *testing.T) {
 	}
 }
 
-func TestPrunePromptCountsBothKinds(t *testing.T) {
-	doomed := stackVerdict(t, "", true, branchVerdict{name: "feat/landed", merged: true})
-	kept := stackVerdict(t, "", false, branchVerdict{name: "feat/other", merged: true})
-
+func TestPrunePromptNamesEveryKindItWillTake(t *testing.T) {
 	cases := []struct {
-		name   string
-		doomed []wsVerdict
-		kept   []wsVerdict
-		want   string
+		name                            string
+		workspaces, worktrees, branches int
+		want                            string
 	}{
-		{"workspaces only", []wsVerdict{stackVerdict(t, "", true)}, nil, "remove 1 workspace(s)?"},
-		{"branches only", nil, []wsVerdict{kept}, "delete 1 merged branch(es)?"},
-		{"both", []wsVerdict{doomed}, []wsVerdict{kept}, "remove 1 workspace(s) and delete 2 merged branch(es)?"},
+		{"workspaces only", 1, 0, 0, "remove 1 workspace(s)?"},
+		{"branches only", 0, 0, 1, "delete 1 merged branch(es)?"},
+		{"worktrees only", 0, 2, 0, "remove 2 finished worktree(s)?"},
+		{"all three", 1, 2, 3, "remove 1 workspace(s), remove 2 finished worktree(s), delete 3 merged branch(es)?"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := prunePrompt(c.doomed, c.kept); got != c.want {
+			if got := prunePrompt(c.workspaces, c.worktrees, c.branches); got != c.want {
 				t.Errorf("prunePrompt = %q, want %q", got, c.want)
 			}
 		})
@@ -160,10 +157,10 @@ func TestReportPruneNamesMergedBranchesOfKeptWorkspaces(t *testing.T) {
 	}
 }
 
-// A workspace kept for one unfinished repo says nothing about the repos that are
-// done, which is where the reader learns what the workspace is still waiting on.
-func TestReportPruneNamesTheFinishedReposOfAKeptWorkspace(t *testing.T) {
-	v := stackVerdict(t, "", false)
+// A repo whose own work has landed goes even though its workspace stays, and the
+// repos still holding the workspace back are what is left under kept:.
+func TestReportPruneOffersTheFinishedReposOfAKeptWorkspace(t *testing.T) {
+	v := stackVerdict(t, "", true)
 	v.repos[0].detail = "PR #1 merged"
 	v.repos = append(v.repos, repoVerdict{
 		repo:   workspace.Repo{Name: "gadget"},
@@ -177,8 +174,8 @@ func TestReportPruneNamesTheFinishedReposOfAKeptWorkspace(t *testing.T) {
 	reportPrune(cmd, []wsVerdict{v})
 
 	got := out.String()
-	if !strings.Contains(got, "(widget): PR #1 merged") {
-		t.Errorf("finished repo not named:\n%s", got)
+	if !strings.Contains(got, "finished worktrees to remove:") || !strings.Contains(got, "(widget): PR #1 merged") {
+		t.Errorf("finished repo not offered for removal:\n%s", got)
 	}
 	if !strings.Contains(got, "(gadget): no pull request") {
 		t.Errorf("blocking repo not named:\n%s", got)

@@ -83,40 +83,62 @@ type removalOpts struct {
 	forceDeleteBranch bool
 }
 
+// detachRepo removes one worktree of a workspace from its source repo, and the
+// branch it was on when opts say so.
+func detachRepo(ws *workspace.Workspace, r workspace.Repo, opts removalOpts) error {
+	// Read the branch while the worktree still exists, and prefer it over the
+	// recorded name: the checked-out branch is the one the removal was judged
+	// against, and the recorded one may belong to work that is still live.
+	branch := ws.Branch
+	if s, err := git.Describe(r.Path); err == nil && s.OnBranch() {
+		branch = s.Branch
+	}
+	// git worktree remove needs the directory to be there. One already gone leaves
+	// only the source repo's registration of it, which worktree prune clears.
+	if err := git.RemoveWorktree(r.Source, r.Path, opts.force); err != nil {
+		if _, statErr := os.Stat(r.Path); statErr == nil {
+			return fmt.Errorf("%s: %w", r.Name, err)
+		}
+		if err := git.PruneWorktrees(r.Source); err != nil {
+			return fmt.Errorf("%s: %w", r.Name, err)
+		}
+	}
+	// A branch that is already gone is not an error: the caller acts only when every
+	// repo succeeded.
+	if opts.deleteBranch && git.BranchExists(r.Source, branch) {
+		flag := "-d"
+		if opts.force || opts.forceDeleteBranch {
+			flag = "-D"
+		}
+		if err := git.RunPassthrough(r.Source, "branch", flag, branch); err != nil {
+			return fmt.Errorf("%s: delete branch: %w", r.Name, err)
+		}
+	}
+	return nil
+}
+
+// removeRepo detaches one worktree and stops recording it, leaving the rest of the
+// workspace in place.
+func removeRepo(ws *workspace.Workspace, r workspace.Repo, opts removalOpts) error {
+	if err := detachRepo(ws, r, opts); err != nil {
+		return err
+	}
+	kept := make([]workspace.Repo, 0, len(ws.Repos))
+	for _, other := range ws.Repos {
+		if other.Name != r.Name {
+			kept = append(kept, other)
+		}
+	}
+	ws.Repos = kept
+	return ws.Save()
+}
+
 // removeWorkspace detaches every worktree of a workspace and deletes its root directory.
 func removeWorkspace(ws *workspace.Workspace, opts removalOpts) error {
 	var errs []error
 	for _, r := range ws.Repos {
-		// Read the branch while the worktree still exists, and prefer it over the
-		// recorded name: the checked-out branch is the one the removal was judged
-		// against, and the recorded one may belong to work that is still live.
-		branch := ws.Branch
-		if s, err := git.Describe(r.Path); err == nil && s.OnBranch() {
-			branch = s.Branch
-		}
-		// git worktree remove needs the directory to be there. One already gone leaves
-		// only the source repo's registration of it, which worktree prune clears.
-		removeErr := git.RemoveWorktree(r.Source, r.Path, opts.force)
-		if removeErr != nil {
-			if _, statErr := os.Stat(r.Path); statErr == nil {
-				errs = append(errs, fmt.Errorf("%s: %w", r.Name, removeErr))
-				continue
-			}
-			if err := git.PruneWorktrees(r.Source); err != nil {
-				errs = append(errs, fmt.Errorf("%s: %w", r.Name, err))
-				continue
-			}
-		}
-		// A branch that is already gone is not an error: the root below is deleted only
-		// when every repo succeeded.
-		if opts.deleteBranch && git.BranchExists(r.Source, branch) {
-			flag := "-d"
-			if opts.force || opts.forceDeleteBranch {
-				flag = "-D"
-			}
-			if err := git.RunPassthrough(r.Source, "branch", flag, branch); err != nil {
-				errs = append(errs, fmt.Errorf("%s: delete branch: %w", r.Name, err))
-			}
+		if err := detachRepo(ws, r, opts); err != nil {
+			errs = append(errs, err)
 		}
 	}
 	if len(errs) > 0 {
