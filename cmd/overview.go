@@ -6,12 +6,14 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"sync"
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
 
 	"github.com/draftcode/mwt/internal/gh"
+	"github.com/draftcode/mwt/internal/ghstack"
 	"github.com/draftcode/mwt/internal/git"
 	"github.com/draftcode/mwt/internal/workspace"
 )
@@ -61,11 +63,7 @@ func overviewCmd() *cobra.Command {
 					continue
 				}
 				for _, r := range ws.Repos {
-					row := overviewRow{Workspace: ws.Name, Repo: r.Name, Path: r.Path, Branch: ws.Branch}
-					if s, err := git.Describe(r.Path); err == nil {
-						row.Branch, row.Dirty, row.Ahead, row.Behind = s.Branch, s.Dirty, s.Ahead, s.Behind
-					}
-					rows = append(rows, row)
+					rows = append(rows, repoRows(ws, r)...)
 				}
 			}
 
@@ -84,6 +82,49 @@ func overviewCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&noPR, "no-pr", false, "skip pull request lookups (no network, no gh)")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "emit JSON instead of a table")
 	return cmd
+}
+
+// repoRows expands one worktree into a row per branch of the stack gh stack
+// tracks there, base first, and a single row when there is no stack to show.
+func repoRows(ws *workspace.Workspace, r workspace.Repo) []overviewRow {
+	base := overviewRow{Workspace: ws.Name, Repo: r.Name, Path: r.Path, Branch: ws.Branch}
+	current := base
+	if s, err := git.Describe(r.Path); err == nil {
+		current.Branch, current.Dirty, current.Ahead, current.Behind = s.Branch, s.Dirty, s.Ahead, s.Behind
+	}
+	stack, err := ghstack.Branches(r.Path)
+	if err != nil {
+		return []overviewRow{current}
+	}
+	// gh stack keeps a merged branch in its state after deleting the branch itself,
+	// so the state names branches that are no longer there.
+	var live []string
+	for _, b := range stack {
+		if git.BranchExists(r.Path, b.Name) {
+			live = append(live, b.Name)
+		}
+	}
+	if len(live) < 2 {
+		return []overviewRow{current}
+	}
+
+	var rows []overviewRow
+	// A worktree can sit on a branch outside its stack, or on none at all; that
+	// checkout is the one thing the table must not lose.
+	if !slices.Contains(live, current.Branch) {
+		rows = append(rows, current)
+	}
+	for _, name := range live {
+		if name == current.Branch {
+			rows = append(rows, current)
+			continue
+		}
+		row := base
+		row.Branch = name
+		row.Ahead, row.Behind = git.BranchAheadBehind(r.Path, name)
+		rows = append(rows, row)
+	}
+	return rows
 }
 
 func fillPRs(rows []overviewRow) {
@@ -110,18 +151,25 @@ func fillPRs(rows []overviewRow) {
 func renderOverview(cmd *cobra.Command, rows []overviewRow) error {
 	w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
 	fmt.Fprintln(w, "WORKSPACE\tREPO\tBRANCH\tD\tA\tB\tPR\tSTATE\tCHECKS")
-	prev := ""
+	prevWS, prevRepo := "", ""
 	for _, r := range rows {
-		// Print the workspace once per group so multi-repo workspaces read as a
-		// unit rather than repeating a long branch name on every line.
-		ws := r.Workspace
-		if ws == prev {
+		// Print the workspace and repo once per group so a multi-repo workspace and
+		// a multi-branch stack each read as a unit rather than repeating a long
+		// name on every line.
+		ws, repo := r.Workspace, dash(r.Repo)
+		if ws == prevWS {
 			ws = ""
+			if repo == prevRepo {
+				repo = ""
+			}
 		} else {
-			prev = r.Workspace
+			prevWS = r.Workspace
+		}
+		if repo != "" {
+			prevRepo = repo
 		}
 		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-			ws, dash(r.Repo), r.Branch,
+			ws, repo, r.Branch,
 			count(r.Dirty), count(r.Ahead), count(r.Behind),
 			prNumber(r.PR), dash(r.State), dash(r.Checks))
 	}

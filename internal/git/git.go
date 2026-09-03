@@ -259,14 +259,18 @@ func UnpushedCommits(dir string, known ...string) (int, error) {
 
 // UnpushedCommitList is UnpushedCommits with the commits themselves, newest first.
 func UnpushedCommitList(dir string, known ...string) ([]string, error) {
-	args := []string{"rev-list", "HEAD"}
-	for _, ref := range known {
+	return refUnpushedCommitList(dir, "HEAD", known)
+}
+
+func refUnpushedCommitList(dir, ref string, known []string) ([]string, error) {
+	args := []string{"rev-list", ref}
+	for _, k := range known {
 		// An unknown ref would abort rev-list, and a PR head is routinely absent
 		// locally (never fetched, or dropped when the remote branch was deleted).
-		if !HasCommit(dir, ref) {
+		if !HasCommit(dir, k) {
 			continue
 		}
-		args = append(args, "^"+ref)
+		args = append(args, "^"+k)
 	}
 	// --not must come last: it flips the sense of every ref after it, so the ^refs
 	// above would turn into inclusions if they trailed it.
@@ -315,24 +319,25 @@ func EquivalentCommits(dir, upstream, head string) (map[string]bool, error) {
 	return dup, nil
 }
 
-// UnmergedCommits counts the commits on HEAD that a merged pull request does not
+// UnmergedCommits counts the commits on ref that a merged pull request does not
 // account for: those on no remote ref whose patch is absent from prHead's history
-// too.
+// too. ref is "HEAD" for a checked-out branch and a branch name for any other,
+// which is every branch of a stack but one.
 //
 // Matching by patch and not by hash is what makes the count survive a rewrite. A
 // branch amended or rebased between its last push and the merge keeps a copy of
 // every merged commit under a fresh hash, and by reachability alone each copy
 // reads as work that never landed — permanently, since no later push can make a
 // commit that no longer exists upstream reachable.
-func UnmergedCommits(dir, prHead string) (int, error) {
-	local, err := UnpushedCommitList(dir, prHead)
+func UnmergedCommits(dir, ref, prHead string) (int, error) {
+	local, err := refUnpushedCommitList(dir, ref, []string{prHead})
 	if err != nil {
 		return 0, err
 	}
 	if len(local) == 0 || !HasCommit(dir, prHead) {
 		return len(local), nil
 	}
-	dup, err := EquivalentCommits(dir, prHead, "HEAD")
+	dup, err := EquivalentCommits(dir, prHead, ref)
 	if err != nil {
 		return 0, err
 	}
@@ -416,4 +421,47 @@ func HasUnpushedWork(dir string) (bool, string, error) {
 		reasons = append(reasons, fmt.Sprintf("%d unpushed commit(s)", n))
 	}
 	return len(reasons) > 0, strings.Join(reasons, ", "), nil
+}
+
+// BranchAheadBehind counts commits between branch and its upstream, for a branch
+// that need not be checked out. Both counts are zero when there is no upstream.
+func BranchAheadBehind(dir, branch string) (ahead, behind int) {
+	out, err := Run(dir, "rev-list", "--left-right", "--count", branch+"..."+branch+"@{upstream}")
+	if err != nil {
+		return 0, 0
+	}
+	fields := strings.Fields(out)
+	if len(fields) != 2 {
+		return 0, 0
+	}
+	ahead, _ = strconv.Atoi(fields[0])
+	behind, _ = strconv.Atoi(fields[1])
+	return ahead, behind
+}
+
+// BranchCheckout returns the worktree holding branch, if any worktree of the repo
+// has it checked out. Deleting such a branch is something git refuses, so asking
+// first keeps a removal from being reported before it is attempted.
+func BranchCheckout(dir, branch string) (string, bool) {
+	out, err := Run(dir, "worktree", "list", "--porcelain")
+	if err != nil {
+		return "", false
+	}
+	path := ""
+	for _, line := range strings.Split(out, "\n") {
+		switch {
+		case strings.HasPrefix(line, "worktree "):
+			path = strings.TrimPrefix(line, "worktree ")
+		case line == "branch refs/heads/"+branch:
+			return path, true
+		}
+	}
+	return "", false
+}
+
+// DeleteBranch drops a local branch, with -D so a squash-merged one goes too: it
+// is not an ancestor of its base, and -d refuses it even though the work landed.
+func DeleteBranch(dir, branch string) error {
+	_, err := Run(dir, "branch", "-D", branch)
+	return err
 }

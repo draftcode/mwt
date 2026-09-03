@@ -283,7 +283,7 @@ func writeCommit(t *testing.T, dir, name, content, msg string) {
 
 func unmerged(t *testing.T, dir, prHead string) int {
 	t.Helper()
-	n, err := UnmergedCommits(dir, prHead)
+	n, err := UnmergedCommits(dir, "HEAD", prHead)
 	if err != nil {
 		t.Fatalf("UnmergedCommits: %v", err)
 	}
@@ -511,5 +511,102 @@ func TestHasUnpushedWorkIgnoresStaleSubmodulePointer(t *testing.T) {
 	}
 	if has {
 		t.Errorf("HasUnpushedWork = true (%s), want false", reason)
+	}
+}
+
+// Every branch of a stack but one is not checked out, so ahead/behind has to be
+// readable without a checkout.
+func TestBranchAheadBehindReadsABranchThatIsNotCheckedOut(t *testing.T) {
+	dir := newRepo(t)
+	topicBranch(t, dir)
+	commit(t, dir, "work")
+	mustRun(t, dir, "checkout", "main")
+
+	ahead, behind := BranchAheadBehind(dir, "topic")
+
+	if ahead != 1 || behind != 0 {
+		t.Errorf("ahead, behind = %d, %d; want 1, 0", ahead, behind)
+	}
+}
+
+func TestBranchAheadBehindWithoutUpstreamIsZero(t *testing.T) {
+	dir := newRepo(t)
+	mustRun(t, dir, "branch", "orphan")
+
+	ahead, behind := BranchAheadBehind(dir, "orphan")
+
+	if ahead != 0 || behind != 0 {
+		t.Errorf("ahead, behind = %d, %d; want 0, 0", ahead, behind)
+	}
+}
+
+// Judging a stack means judging branches nobody has checked out, so the same
+// patch-id reasoning has to hold for a branch named explicitly.
+func TestUnmergedCommitsJudgesABranchWithoutCheckout(t *testing.T) {
+	dir := newRepo(t)
+	topicBranch(t, dir)
+	writeCommit(t, dir, "feature.txt", "feature\n", "work")
+	prHead := mustRun(t, dir, "rev-parse", "HEAD")
+	mustRun(t, dir, "checkout", "main")
+
+	n, err := UnmergedCommits(dir, "topic", prHead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Errorf("got %d, want 0: the branch is exactly the merged tip", n)
+	}
+}
+
+func TestUnmergedCommitsKeepsADivergedBranchWithoutCheckout(t *testing.T) {
+	dir := newRepo(t)
+	topicBranch(t, dir)
+	writeCommit(t, dir, "feature.txt", "feature\nreviewed\n", "work")
+	prHead := mustRun(t, dir, "rev-parse", "HEAD")
+	mustRun(t, dir, "reset", "--hard", "HEAD~1")
+	writeCommit(t, dir, "feature.txt", "feature\n", "work")
+	mustRun(t, dir, "checkout", "main")
+
+	n, err := UnmergedCommits(dir, "topic", prHead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Errorf("got %d, want 1", n)
+	}
+}
+
+func TestBranchCheckoutFindsTheHoldingWorktree(t *testing.T) {
+	dir := newRepo(t)
+
+	path, ok := BranchCheckout(dir, "main")
+
+	if !ok || path != dir {
+		t.Errorf("BranchCheckout = %q, %v; want %q, true", path, ok, dir)
+	}
+}
+
+func TestBranchCheckoutIgnoresABranchNobodyHolds(t *testing.T) {
+	dir := newRepo(t)
+	mustRun(t, dir, "branch", "idle")
+
+	if path, ok := BranchCheckout(dir, "idle"); ok {
+		t.Errorf("BranchCheckout = %q, true; want false", path)
+	}
+}
+
+// A squash-merged branch is not an ancestor of its base, so deletion has to be
+// forced or nothing merged that way could ever be cleaned up.
+func TestDeleteBranchDropsAnUnmergedBranch(t *testing.T) {
+	dir := newRepo(t)
+	topicBranch(t, dir)
+	commit(t, dir, "work")
+	mustRun(t, dir, "checkout", "main")
+
+	if err := DeleteBranch(dir, "topic"); err != nil {
+		t.Fatal(err)
+	}
+	if BranchExists(dir, "topic") {
+		t.Error("branch still exists")
 	}
 }
