@@ -417,3 +417,19 @@ func HasUnpushedWork(dir string) (bool, string, error) {
 	}
 	return len(reasons) > 0, strings.Join(reasons, ", "), nil
 }
+
+// BranchAheadBehind counts commits between branch and its upstream, for a branch
+// that need not be checked out. Both counts are zero when there is no upstream.
+func BranchAheadBehind(dir, branch string) (ahead, behind int) {
+	out, err := Run(dir, "rev-list", "--left-right", "--count", branch+"..."+branch+"@{upstream}")
+	if err != nil {
+		return 0, 0
+	}
+	fields := strings.Fields(out)
+	if len(fields) != 2 {
+		return 0, 0
+	}
+	ahead, _ = strconv.Atoi(fields[0])
+	behind, _ = strconv.Atoi(fields[1])
+	return ahead, behind
+}

@@ -513,3 +513,29 @@ func TestHasUnpushedWorkIgnoresStaleSubmodulePointer(t *testing.T) {
 		t.Errorf("HasUnpushedWork = true (%s), want false", reason)
 	}
 }
+
+// Every branch of a stack but one is not checked out, so ahead/behind has to be
+// readable without a checkout.
+func TestBranchAheadBehindReadsABranchThatIsNotCheckedOut(t *testing.T) {
+	dir := newRepo(t)
+	topicBranch(t, dir)
+	commit(t, dir, "work")
+	mustRun(t, dir, "checkout", "main")
+
+	ahead, behind := BranchAheadBehind(dir, "topic")
+
+	if ahead != 1 || behind != 0 {
+		t.Errorf("ahead, behind = %d, %d; want 1, 0", ahead, behind)
+	}
+}
+
+func TestBranchAheadBehindWithoutUpstreamIsZero(t *testing.T) {
+	dir := newRepo(t)
+	mustRun(t, dir, "branch", "orphan")
+
+	ahead, behind := BranchAheadBehind(dir, "orphan")
+
+	if ahead != 0 || behind != 0 {
+		t.Errorf("ahead, behind = %d, %d; want 0, 0", ahead, behind)
+	}
+}
