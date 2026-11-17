@@ -171,7 +171,7 @@ func renderOverview(cmd *cobra.Command, rows []overviewRow) error {
 		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			ws, repo, r.Branch,
 			count(r.Dirty), count(r.Ahead), count(r.Behind),
-			prNumber(r.PR), dash(r.State), dash(r.Checks))
+			prNumber(r.PR), dash(r.State), checkLabel(r.Checks))
 	}
 	return w.Flush()
 }
@@ -189,6 +189,15 @@ func prNumber(n int) string {
 		return "-"
 	}
 	return fmt.Sprintf("#%d", n)
+}
+
+var checkLabels = map[string]string{"passing": "OK", "pending": "RUNNING...", "failing": "FAIL"}
+
+func checkLabel(s string) string {
+	if l, ok := checkLabels[s]; ok {
+		return l
+	}
+	return dash(s)
 }
 
 func dash(s string) string {
