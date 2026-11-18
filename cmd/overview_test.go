@@ -182,3 +182,22 @@ func TestRepoRowsCollapsesWhenOnlyTheCheckoutIsLeft(t *testing.T) {
 		t.Errorf("branches = %v, want [feat/base]", got)
 	}
 }
+
+// Run as a git alias inside a worktree, mwt inherits that worktree's GIT_DIR.
+func TestRepoRowsIgnoresAnInheritedGitDir(t *testing.T) {
+	other := stackRepo(t, "fix/other")
+	otherGitDir, err := git.Dir(other)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := stackRepo(t, "feat/base")
+	t.Setenv("GIT_DIR", otherGitDir)
+
+	if err := clearInheritedRepoEnv(); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := branches(rowsFor(t, dir)); len(got) != 1 || got[0] != "feat/base" {
+		t.Errorf("branches = %v, want [feat/base]", got)
+	}
+}
